@@ -1,11 +1,14 @@
 # Paste this into TrueNAS SCALE → Apps → Discover Apps → Custom App.
-# Replace the image name with the one you pushed (see scripts/publish).
+# Image published by .github/workflows/publish.yml on pushes to main.
+# If the GHCR package is private, add ghcr.io under
+# Apps → Configuration → Container Registries (GitHub username + PAT with read:packages),
+# or make the package public. scripts/publish is the manual fallback.
 # Replace the volume path with your dataset. Host networking is required for mDNS.
 # Port 8787 must be free on the NAS.
 
 services:
   wled-fleet:
-    image: docker.io/YOURUSER/wled-fleet:latest
+    image: ghcr.io/dylanl321/wled-fleet:latest
     network_mode: host
     restart: unless-stopped
     environment:

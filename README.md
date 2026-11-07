@@ -50,27 +50,20 @@ pytest
 
 ## TrueNAS SCALE
 
-This repo is private on Origin, so nothing here publishes an image on its own. TrueNAS Custom Apps pull an image. They do not build from this checkout. Build once on a computer that has Docker and this repo, push to Docker Hub, then paste the compose below.
+Pushes to `main` build the image and publish it to GHCR as `ghcr.io/dylanl321/wled-fleet:latest`, plus the version from `APP_VERSION` and the full commit SHA. TrueNAS Custom Apps pull that image. They do not build from this checkout.
 
 SCALE 24.10 and later (the Docker-based Apps screen) is the version this is for.
 
-1. On your computer, from this repo, log in and publish. `YOURUSER` is your Docker Hub username. TrueNAS SCALE is amd64, and the script builds that even from an Apple Silicon Mac.
-
-```bash
-docker login
-./scripts/publish docker.io/YOURUSER/wled-fleet:latest
-```
-
-A public Docker Hub repository is enough. The image contains no passwords. If you leave the repository private, add that Docker Hub login under TrueNAS **Apps → Configuration → Container Registries** before the next step, or the NAS cannot pull it.
+1. The Custom App image is `ghcr.io/dylanl321/wled-fleet:latest`. The image contains no passwords. If the GHCR package stays private, the NAS cannot pull it until you add a registry login under **Apps → Configuration → Container Registries**: registry `ghcr.io`, your GitHub username, and a personal access token with `read:packages`. Making the package public (the package page → Package settings → Change visibility) removes that login.
 
 2. On TrueNAS, create a dataset `tank/apps/wled-fleet` (the path will be `/mnt/tank/apps/wled-fleet`). The Apps user is uid `568`. The container starts as root, gives `/data` to `PUID`/`PGID` 568, then drops privileges. You can leave the dataset owned by root.
 
-3. **Apps → Discover Apps → Custom App**. Name it `wled-fleet`. Paste this. Change `YOURUSER`, the timezone, and the dataset path if yours is not `tank`.
+3. **Apps → Discover Apps → Custom App**. Name it `wled-fleet`. Paste this. Change the timezone and the dataset path if yours is not `tank`.
 
 ```yaml
 services:
   wled-fleet:
-    image: docker.io/YOURUSER/wled-fleet:latest
+    image: ghcr.io/dylanl321/wled-fleet:latest
     network_mode: host
     restart: unless-stopped
     environment:
@@ -95,7 +88,14 @@ The same file is `docker-compose.truenas.yml`. Port `8787` has to be free on the
 
 4. Install, then open `http://<truenas-ip>:8787` from a phone on the LAN.
 
-To update later, run `./scripts/publish docker.io/YOURUSER/wled-fleet:latest` again and restart the app on the NAS so it pulls the new `latest`.
+To update later, push to `main` and restart the app on the NAS so it pulls the new `latest`.
+
+If Actions is unavailable, build and push from a computer that has Docker and this repo. TrueNAS SCALE is amd64, and `scripts/publish` builds that even from an Apple Silicon Mac. A token used to push needs `write:packages`.
+
+```bash
+echo YOUR_GHCR_TOKEN | docker login ghcr.io -u YOURUSER --password-stdin
+./scripts/publish ghcr.io/dylanl321/wled-fleet:latest
+```
 
 ### If the controllers never appear
 
