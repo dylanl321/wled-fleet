@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="theme-color" content="#101311">
   <meta name="color-scheme" content="dark">
   <meta name="robots" content="noindex">
@@ -18,9 +18,19 @@
   <style>html,body{background:#101311;color:#f4f0e6;margin:0}</style>
 </head>
 <body>
-  <div id="app">
-    <header class="topbar"><h1>WLED Fleet</h1></header>
-    <main></main>
+  <div id="app" class="app">
+    <header class="topbar"><span class="mark"></span><h1>WLED Fleet</h1></header>
+    <div class="stage">
+      <section class="pane" data-pane="control"></section>
+      <section class="pane" data-pane="devices" hidden></section>
+      <section class="pane" data-pane="firmware" hidden></section>
+      <section class="pane" data-pane="events" hidden></section>
+      <section class="pane" data-pane="settings" hidden></section>
+      <section class="pane" data-pane="stack" hidden></section>
+    </div>
+    <div id="dock-slot"></div>
+    <div id="tab-slot"></div>
+    <div id="sheet-slot"></div>
   </div>
   <script src="/static/app.js"></script>
 </body>

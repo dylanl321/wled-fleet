@@ -58,6 +58,8 @@
     sectionTimer: 0,
     lastLook: "",
     groupDraft: null,
+    scrolls: {},
+    visiblePane: "",
   };
   hydrateUi();
   if (state.control || state.devices.length) state.booting = false;
@@ -67,6 +69,8 @@
   let loadGeneration = 0;
   let controlGeneration = 0;
 
+  const SHEET_KEEP = { more: 1, effects: 1, palettes: 1, sections: 1, boards: 1, color: 1, customize: 1, tools: 1, group: 1, saved: 1 };
+
   function hydrateUi() {
     try {
       const data = JSON.parse(localStorage.getItem("wled-fleet-ui") || "null");
@@ -74,17 +78,36 @@
       if (Array.isArray(data.devices)) state.devices = data.devices;
       if (data.control && typeof data.control === "object") state.control = data.control;
       if ("groupId" in data) state.groupId = data.groupId;
+      if (data.scrolls && typeof data.scrolls === "object") state.scrolls = data.scrolls;
+      if (data.skipped && typeof data.skipped === "object") state.skipped = data.skipped;
+      if (data.selected && typeof data.selected === "object") state.selected = data.selected;
+      if (data.sections && typeof data.sections === "object") state.sections = data.sections;
+      if (data.sheet && data.sheet.kind && SHEET_KEEP[data.sheet.kind]) state.sheet = data.sheet;
+      if (data.lastLook) state.lastLook = data.lastLook;
+      const hash = location.hash;
+      if (data.hash && (hash === "" || hash === "#" || hash === "#/")) history.replaceState(null, "", data.hash);
     } catch (error) { /* private mode or an old value */ }
   }
 
+  let persistTimer = 0;
   function persistUi() {
-    try {
-      localStorage.setItem("wled-fleet-ui", JSON.stringify({
-        devices: state.devices,
-        control: state.control,
-        groupId: state.groupId,
-      }));
-    } catch (error) { /* private mode */ }
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => {
+      try {
+        localStorage.setItem("wled-fleet-ui", JSON.stringify({
+          devices: state.devices,
+          control: state.control,
+          groupId: state.groupId,
+          scrolls: state.scrolls,
+          skipped: state.skipped,
+          selected: state.selected,
+          sections: state.sections,
+          sheet: state.sheet && SHEET_KEEP[state.sheet.kind] ? state.sheet : null,
+          lastLook: state.lastLook,
+          hash: location.hash || "#/",
+        }));
+      } catch (error) { /* private mode */ }
+    }, 60);
   }
 
   function esc(value) {
@@ -123,14 +146,6 @@
       state.backup = null;
     } else if (route.name === "diff") {
       state.diff = null;
-    } else if (route.name === "firmware") {
-      state.bins = [];
-      state.profiles = [];
-      state.releases = [];
-    } else if (route.name === "events") {
-      state.events = [];
-    } else if (route.name === "settings") {
-      state.settings = null;
     }
   }
 
@@ -247,9 +262,70 @@
     });
   }
 
+  function scrollKey() {
+    const route = state.route || { name: "control" };
+    let key = route.name || "control";
+    if (route.mac) key += ":" + route.mac;
+    if (route.id) key += ":" + route.id;
+    if (route.name === "control") key += ":" + (state.groupId == null ? "all" : state.groupId);
+    return key;
+  }
+
+  function routePane(route) {
+    const name = route && route.name;
+    if (name === "device" || name === "backup" || name === "diff") return "stack";
+    if (name === "control" || name === "devices" || name === "firmware" || name === "events" || name === "settings") return name;
+    return "devices";
+  }
+
+  function paneEl(name) {
+    return document.querySelector('.pane[data-pane="' + name + '"]');
+  }
+
+  function visiblePane() {
+    return document.querySelector(".pane:not([hidden])");
+  }
+
+  function rememberScroll(pane) {
+    if (!pane || pane.hidden) return;
+    const key = pane.dataset.scrollKey;
+    if (!key) return;
+    state.scrolls[key] = pane.scrollTop;
+  }
+
+  function showOnly(name) {
+    document.querySelectorAll(".pane").forEach((pane) => {
+      const on = pane.dataset.pane === name;
+      pane.hidden = !on;
+      if (!state.sheet && "inert" in pane) pane.inert = !on;
+    });
+  }
+
+  function syncInsets() {
+    const dock = document.getElementById("dock-slot");
+    document.documentElement.style.setProperty("--dock", ((dock && dock.offsetHeight) || 0) + "px");
+  }
+
+  function updateChrome() {
+    const current = document.querySelector(".topbar");
+    if (current) current.outerHTML = topbar();
+    const dock = document.getElementById("dock-slot");
+    const tabs = document.getElementById("tab-slot");
+    const sheet = document.getElementById("sheet-slot");
+    if (dock) dock.innerHTML = dockHtml();
+    if (tabs) tabs.innerHTML = state.selecting ? actionBar() : tabbar();
+    if (sheet) sheet.innerHTML = sheetHtml();
+    document.body.classList.toggle("sheet-open", Boolean(state.sheet));
+    document.querySelectorAll(".topbar, .stage, #dock-slot, #tab-slot").forEach((node) => {
+      node.inert = Boolean(state.sheet);
+    });
+    const deviceDock = state.route.name === "device" && !!(state.live && state.live.state);
+    document.body.classList.toggle("has-dock", deviceDock || state.route.name === "control");
+    document.body.classList.toggle("has-control", state.route.name === "control");
+    syncInsets();
+  }
+
   function render(options) {
-    const main = document.querySelector("main");
-    const y = options && options.resetScroll ? 0 : (main ? main.scrollTop : 0);
     const hadSheet = document.body.classList.contains("sheet-open");
     if (state.sheet && !hadSheet) {
       const active = document.activeElement;
@@ -262,19 +338,39 @@
       }
     }
     const restoreAction = hadSheet && !state.sheet ? state.sheetReturn : null;
-    root.innerHTML = shell();
-    const next = document.querySelector("main");
-    if (next) {
-      next.scrollTop = y;
-      if (options && options.transition) next.classList.add("view-enter");
+    if (state.session.required && !state.session.ok) {
+      root.innerHTML = loginView();
+      state.visiblePane = "";
+      return;
     }
+    if (!document.querySelector(".stage")) {
+      root.innerHTML = topbar() + '<div class="stage">' +
+        ["control", "devices", "firmware", "events", "settings", "stack"].map((name) =>
+          '<section class="pane" data-pane="' + name + '" hidden></section>'
+        ).join("") +
+        '</div><div id="dock-slot"></div><div id="tab-slot"></div><div id="sheet-slot"></div>';
+    }
+    const previous = visiblePane();
+    if (previous) rememberScroll(previous);
+    updateChrome();
+    const name = routePane(state.route);
+    const pane = paneEl(name);
+    if (!pane) return;
+    const html = body();
+    const stamp = name + "\n" + html;
+    const switching = state.visiblePane !== name;
+    const replace = pane.dataset.stamp !== stamp;
+    if (replace) {
+      pane.innerHTML = html;
+      pane.dataset.stamp = stamp;
+    }
+    showOnly(name);
+    state.visiblePane = name;
+    pane.dataset.scrollKey = scrollKey();
+    const y = options && options.resetScroll ? 0 : (state.scrolls[scrollKey()] || 0);
+    pane.dataset.restored = String(y);
+    if (replace || switching || (options && options.resetScroll)) pane.scrollTop = y;
     document.body.classList.toggle("sheet-open", Boolean(state.sheet));
-    root.querySelectorAll(":scope > :not(.sheet):not(.backdrop)").forEach((node) => {
-      node.inert = Boolean(state.sheet);
-    });
-    const deviceDock = state.route.name === "device" && !!(state.live && state.live.state);
-    document.body.classList.toggle("has-dock", deviceDock || state.route.name === "control");
-    document.body.classList.toggle("has-control", state.route.name === "control");
     paintLeds();
     if (state.sheet) {
       setTimeout(() => {
@@ -450,7 +546,7 @@
       '<span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' + status + "</span>" +
       nameField(device, "control") + markHtml +
       '<button type="button" class="flash" data-action="flash" data-mac="' + esc(device.mac) + '"' + (device.online ? "" : " disabled") + ' aria-label="Flash ' + esc(device.name) + '">Flash</button></div>' +
-      '<canvas data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + ' colors"></canvas>' +
+      '<canvas data-preview="device" data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + ' lights"></canvas>' +
       '<p class="meta" data-meta="' + compact(device.mac) + '">' + esc(device.effect || "") + "</p></article>";
   }
 
@@ -489,38 +585,154 @@
       "</div>";
   }
 
-  function paintLeds(retry) {
-    if (!state.control) return;
-    let waiting = false;
-    state.control.devices.forEach((device) => {
-      const canvas = document.querySelector('canvas[data-mac="' + compact(device.mac) + '"]');
-      if (!canvas) return;
-      if (!canvas.clientWidth) waiting = true;
-      drawStrip(canvas, device.leds, device.online && device.on);
-    });
-    if (waiting && !retry) requestAnimationFrame(() => paintLeds(true));
+  function paintLeds() {
+    drawPreviews(performance.now());
   }
 
-  function drawStrip(canvas, leds, active) {
-    const dpr = window.devicePixelRatio || 1;
-    const width = canvas.clientWidth || 320;
-    const height = canvas.clientHeight || 22;
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    const context = canvas.getContext("2d");
-    if (!context) return;
-    context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    context.clearRect(0, 0, width, height);
-    const colors = leds && leds.length ? leds : [[28, 28, 26]];
-    const gap = 2;
-    const ledWidth = Math.max(3, (width - gap * (colors.length - 1)) / colors.length);
-    colors.forEach((rgb, index) => {
-      context.fillStyle = active ? cssColor(rgb) : "#2a2e2b";
-      const x = index * (ledWidth + gap);
-      context.beginPath();
-      context.roundRect(x, 6, Math.max(2, ledWidth), 24, 4);
-      context.fill();
+  const morphs = {};
+
+  function effectKind(name) {
+    const text = String(name || "").toLowerCase();
+    if (text.includes("rainbow") || text.includes("pride") || text.includes("colorloop")) return "rainbow";
+    if (text.includes("breath") || text.includes("breathe") || text.includes("fade")) return "breathe";
+    if (text.includes("chase") || text.includes("scanner") || text.includes("wipe") || text.includes("running") || text.includes("comet")) return "chase";
+    if (text.includes("spark") || text.includes("twinkle") || text.includes("firework")) return "sparkle";
+    if (text.includes("fire") || text.includes("candle") || text.includes("flame")) return "fire";
+    if (text.includes("blink") || text.includes("strobe") || text.includes("flash")) return "blink";
+    if (text.includes("theater") || text.includes("saw")) return "theater";
+    if (text.includes("solid") || text === "") return "solid";
+    return "flow";
+  }
+
+  function mix(a, b, t) {
+    return [
+      Math.round(a[0] + (b[0] - a[0]) * t),
+      Math.round(a[1] + (b[1] - a[1]) * t),
+      Math.round(a[2] + (b[2] - a[2]) * t),
+    ];
+  }
+
+  function noteMorph(mac, color) {
+    const previous = morphs[mac] && morphs[mac].current ? morphs[mac].current : color;
+    morphs[mac] = { from: previous, to: color, t0: performance.now(), current: previous };
+  }
+
+  function morphed(mac, color, now) {
+    const item = morphs[mac];
+    if (!item) return color;
+    const t = Math.min(1, (now - item.t0) / 420);
+    const next = mix(item.from, item.to, t);
+    item.current = next;
+    return next;
+  }
+
+  function previewSpec(canvas, now) {
+    if (canvas.dataset.preview === "effect") {
+      const names = (state.control && state.control.effects) || [];
+      return {
+        kind: effectKind(names[Number(canvas.dataset.fx || 0)] || ""),
+        colors: [[255, 64, 48], [40, 220, 120], [70, 120, 255]],
+        on: true,
+        bri: 255,
+        speed: 170,
+        live: null,
+      };
+    }
+    const device = ((state.control && state.control.devices) || []).find((item) => compact(item.mac) === canvas.dataset.mac);
+    if (!device) return null;
+    return {
+      kind: effectKind(device.effect),
+      colors: [
+        morphed(device.mac, (device.col && device.col[0]) || [255, 160, 60], now),
+        (device.col && device.col[1]) || [20, 20, 28],
+        (device.col && device.col[2]) || [0, 0, 0],
+      ],
+      on: !!(device.online && device.on),
+      bri: Number(device.bri || 0),
+      speed: Number(device.sx || 128),
+      live: device.leds && device.leds.length ? device.leds : null,
+    };
+  }
+
+  function hsl(h, s, l) {
+    const a = s * Math.min(l, 1 - l);
+    const f = (n) => {
+      const k = (n + h * 12) % 12;
+      return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    };
+    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
+  }
+
+  function pixelAt(spec, index, count, now) {
+    const primary = spec.colors[0] || [255, 160, 60];
+    const secondary = spec.colors[1] || [0, 0, 0];
+    const level = spec.on ? spec.bri / 255 : 0;
+    const speed = 0.35 + spec.speed / 180;
+    const phase = index / count;
+    const clock = now / 1000 * speed;
+    let rgb = primary;
+    if (!spec.on) rgb = [18, 20, 18];
+    else if (spec.kind === "breathe") rgb = primary.map((channel) => Math.round(channel * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(clock * 3)))));
+    else if (spec.kind === "blink") rgb = primary.map((channel) => Math.round(channel * (Math.sin(clock * 8) > 0 ? 1 : 0.12)));
+    else if (spec.kind === "rainbow") rgb = hsl((phase + clock * 0.25) % 1, 0.85, 0.55);
+    else if (spec.kind === "chase") {
+      const head = (clock * 0.45) % 1;
+      const dist = Math.min(Math.abs(phase - head), 1 - Math.abs(phase - head));
+      rgb = mix(secondary, primary, Math.max(0, 1 - dist * 7));
+    } else if (spec.kind === "theater") rgb = (index + Math.floor(clock * 6)) % 3 === 0 ? primary : secondary;
+    else if (spec.kind === "sparkle") {
+      const spark = Math.sin(index * 12.9898 + Math.floor(clock * 8) * 78.233) * 43758.5453;
+      const frac = spark - Math.floor(spark);
+      rgb = frac > 0.82 ? [255, 255, 240] : primary.map((channel) => Math.round(channel * 0.25));
+    } else if (spec.kind === "fire") {
+      const flicker = 0.45 + 0.55 * Math.abs(Math.sin(clock * 9 + index * 0.7));
+      rgb = [Math.round(255 * flicker), Math.round(90 * flicker * (0.4 + phase)), Math.round(10 * flicker)];
+    } else if (spec.kind === "flow") {
+      rgb = mix(primary, secondary, 0.5 + 0.5 * Math.sin(((phase + clock * 0.3) % 1) * Math.PI * 2));
+    }
+    if (spec.live && spec.live.length && spec.kind !== "rainbow" && spec.kind !== "fire") {
+      const shift = spec.kind === "solid" ? 0 : Math.floor(clock * 6);
+      const sample = spec.live[Math.abs((index + shift) % spec.live.length)];
+      if (sample && spec.kind === "solid") return sample.map((channel) => Math.max(0, Math.min(255, Math.round(channel))));
+      if (sample) rgb = mix(rgb, sample, 0.55);
+    }
+    const scale = spec.on ? level : 1;
+    return rgb.map((channel) => Math.max(0, Math.min(255, Math.round(channel * scale))));
+  }
+
+  function drawPreviews(now) {
+    document.querySelectorAll("canvas[data-preview]").forEach((canvas) => {
+      if (canvas.closest("[hidden]")) return;
+      const spec = previewSpec(canvas, now);
+      if (!spec) return;
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const width = canvas.clientWidth || 120;
+      const height = canvas.clientHeight || 28;
+      const nextW = Math.floor(width * dpr);
+      const nextH = Math.floor(height * dpr);
+      if (canvas.width !== nextW || canvas.height !== nextH) {
+        canvas.width = nextW;
+        canvas.height = nextH;
+      }
+      const context = canvas.getContext("2d");
+      if (!context) return;
+      context.setTransform(dpr, 0, 0, dpr, 0, 0);
+      const count = Math.max(8, Math.round(width / 8));
+      const gap = 2;
+      const led = Math.max(3, (width - gap * (count - 1)) / count);
+      const y = Math.max(2, (height - 16) / 2);
+      for (let index = 0; index < count; index += 1) {
+        context.fillStyle = cssColor(pixelAt(spec, index, count, now));
+        context.beginPath();
+        context.roundRect(index * (led + gap), y, led, Math.min(16, height - 4), 3);
+        context.fill();
+      }
     });
+  }
+
+  function visuals(now) {
+    if (!document.hidden) drawPreviews(now);
+    requestAnimationFrame(visuals);
   }
 
   function updateStripMeta() {
@@ -651,8 +863,12 @@
       if (!device) return;
       if (look.on != null) device.on = look.on;
       if (look.bri != null) device.bri = look.bri;
-      if (look.fx != null && state.control.effects && state.control.effects[look.fx]) device.effect = state.control.effects[look.fx];
+      if (look.fx != null) {
+        device.fx = look.fx;
+        if (state.control.effects && state.control.effects[look.fx]) device.effect = state.control.effects[look.fx];
+      }
       if (look.col && look.col[0]) {
+        noteMorph(device.mac, look.col[0]);
         device.col = look.col;
         const level = device.on ? Number(device.bri || 0) / 255 : 0;
         const color = look.col[0].map((channel) => Math.round(channel * level));
@@ -701,6 +917,14 @@
     };
   }
 
+  function withFade(look) {
+    if (!look || look.tt != null || look.ps != null) return look;
+    const faded = Object.assign({}, look);
+    const onlyBrightness = look.bri != null && look.col == null && look.fx == null && look.pal == null && look.on == null;
+    faded.tt = onlyBrightness ? 3 : 8;
+    return faded;
+  }
+
   async function pushLook(action, id, lookOverride) {
     const macs = targetMacs();
     if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
@@ -719,7 +943,7 @@
       }
       return;
     }
-    const look = action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) });
+    const look = withFade(action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) }));
     if (action === "direct" && lookOverride) applyLookToComposer(lookOverride);
     if (action === "apply-preset") state.lookCurrent = false;
     rememberUndo();
@@ -1120,9 +1344,22 @@
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
       '<div class="sheet choice-sheet" role="dialog" aria-modal="true" aria-label="' + title + '"><div class="sheet-head sticky"><div><p class="eyebrow">CUSTOMIZE</p><h2>' + title + '</h2></div><button class="sheet-close" type="button" data-action="customize">Back</button></div>' +
       '<input class="choice-search" id="choice-filter" type="search" placeholder="Search ' + title.toLowerCase() + '" aria-label="Search ' + title.toLowerCase() + '">' +
-      '<div class="choice-list">' + (items.length ? items.map((name, index) =>
-        '<button type="button" class="rowbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><span>' + (index === current ? "✓ " : "") + esc(name) + "</span></button>"
-      ).join("") : "<p>This controller did not send a list. The number still applies.</p>") + "</div></div>";
+      '<div class="choice-list">' + (items.length ? items.map((name, index) => {
+        if (kind === "effects") {
+          return '<button type="button" class="rowbtn fxbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><canvas data-preview="effect" data-fx="' + index + '" aria-hidden="true"></canvas><span>' + esc(name) + "</span></button>";
+        }
+        return '<button type="button" class="rowbtn palbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><i style="background:' + paletteGradient(name) + '"></i><span>' + esc(name) + "</span></button>";
+      }).join("") : "<p>This controller did not send a list. The number still applies.</p>") + "</div></div>";
+  }
+
+  function paletteGradient(name) {
+    const text = String(name || "").toLowerCase();
+    if (text.includes("cloud")) return "linear-gradient(90deg,#1c2433,#8aa,#eef)";
+    if (text.includes("ocean") || text.includes("sea") || text.includes("beach")) return "linear-gradient(90deg,#021526,#046,#2ad)";
+    if (text.includes("forest") || text.includes("green")) return "linear-gradient(90deg,#021408,#164,#8c4)";
+    if (text.includes("fire") || text.includes("heat") || text.includes("lava")) return "linear-gradient(90deg,#100,#c20,#fc0,#fff)";
+    if (text.includes("party") || text.includes("rainbow") || text.includes("color")) return "linear-gradient(90deg,#f24,#fd0,#2d4,#2cf,#44f,#d4f)";
+    return "linear-gradient(90deg,#2a140c,#f0a33a,#fff4d2)";
   }
 
   function sectionsSheet() {
@@ -2185,17 +2422,23 @@
   });
   window.addEventListener("pointercancel", () => { clearInterval(repeat); repeat = 0; });
   window.addEventListener("hashchange", () => {
-    state.sheet = null;
+    const pane = visiblePane();
+    if (pane) rememberScroll(pane);
     state.edits = null;
-    state.selecting = false;
-    state.selected = {};
     const route = parseRoute();
     clearRouteState(route);
     state.route = route;
     state.booting = false;
-    if (canRepaint()) render({ resetScroll: true, transition: true });
+    persistUi();
+    render();
     load(false, { paintEarly: false });
   });
+  root.addEventListener("scroll", (event) => {
+    const pane = event.target && event.target.closest ? event.target.closest(".pane") : null;
+    if (!pane || pane.hidden) return;
+    state.scrolls[pane.dataset.scrollKey || scrollKey()] = pane.scrollTop;
+    persistUi();
+  }, true);
   root.addEventListener("focusout", (event) => {
     const input = event.target;
     if (!input || !input.classList || !input.classList.contains("rename-input")) return;
@@ -2256,5 +2499,6 @@
     touchX = null;
   }, { passive: true });
 
+  requestAnimationFrame(visuals);
   boot();
 })();
