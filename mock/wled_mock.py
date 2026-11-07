@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import colorsys
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -17,6 +19,9 @@ from zeroconf import IPVersion, ServiceInfo, Zeroconf
 log = logging.getLogger("wled-mock")
 
 SKIP_CFG_KEYS = {"pin", "v", "rb", "time", "tt"}
+
+EFFECTS = ["Solid", "Blink", "Breathe", "Wipe", "Rainbow", "Chase", "Theater", "Scanner"]
+PALETTES = ["Default", "Warm", "Ocean", "Rainbow", "Party", "Forest"]
 
 
 @dataclass
@@ -87,11 +92,14 @@ class MockDevice:
                     "on": True,
                     "bri": 255,
                     "rev": False,
-                    "col": [[255, 160, 60], [0, 0, 0], [0, 0, 0]],
+                    "col": [[255, 160, 60], [40, 0, 0], [0, 0, 0]],
                     "fx": 0,
+                    "pal": 0,
                     "sx": 128,
+                    "ix": 128,
                 }
             ],
+            "udpn": {"send": False, "recv": True},
         }
         self._lock = threading.Lock()
 
@@ -131,12 +139,27 @@ class MockDevice:
         if payload.get("rb"):
             self.reboot()
             return
-        for key in ("on", "bri", "ps"):
+        if "ps" in payload:
+            self.state["ps"] = payload["ps"]
+            preset = self.presets.get(str(payload["ps"]))
+            if isinstance(preset, dict):
+                for key in ("on", "bri"):
+                    if key in preset:
+                        self.state[key] = preset[key]
+                if isinstance(preset.get("seg"), list):
+                    self._merge_segments(preset["seg"])
+        for key in ("on", "bri"):
             if key in payload:
                 self.state[key] = payload[key]
+        if isinstance(payload.get("udpn"), dict):
+            current = self.state.setdefault("udpn", {"send": False, "recv": True})
+            if isinstance(current, dict):
+                current.update({key: bool(value) for key, value in payload["udpn"].items() if key in {"send", "recv"}})
         segments = payload.get("seg")
-        if not isinstance(segments, list):
-            return
+        if isinstance(segments, list):
+            self._merge_segments(segments)
+
+    def _merge_segments(self, segments: list) -> None:
         for patch in segments:
             if not isinstance(patch, dict):
                 continue
@@ -151,6 +174,10 @@ class MockDevice:
             for key, value in patch.items():
                 if key != "id":
                     target[key] = value
+
+    def live_colors(self) -> list[list[int]]:
+        count = max(12, min(36, int(self.spec.leds / 4) or 12))
+        return render_live(self.state, count, time.time())
 
     def apply_cfg(self, payload: dict) -> None:
         ota = payload.get("ota") if isinstance(payload.get("ota"), dict) else None
@@ -201,6 +228,55 @@ class MockDevice:
         self.reboot()
 
 
+def render_live(state: dict, count: int, now: float) -> list[list[int]]:
+    """Downsampled LED colors for /json/live. Effects move with time and speed."""
+    segments = state.get("seg") if isinstance(state.get("seg"), list) else []
+    segment = segments[0] if segments and isinstance(segments[0], dict) else {}
+    colors = segment.get("col") if isinstance(segment.get("col"), list) else []
+    primary = colors[0] if colors and isinstance(colors[0], list) else [255, 160, 60]
+    secondary = colors[1] if len(colors) > 1 and isinstance(colors[1], list) else [0, 0, 0]
+    primary = [int(primary[i]) if i < len(primary) else 0 for i in range(3)]
+    secondary = [int(secondary[i]) if i < len(secondary) else 0 for i in range(3)]
+    fx = int(segment.get("fx") or 0)
+    speed = int(segment.get("sx") or 128)
+    level = int(state.get("bri") or 0) if state.get("on") else 0
+    clock = now * (0.35 + speed / 160)
+    pixels: list[list[int]] = []
+    width = max(1, count)
+    for index in range(width):
+        phase = index / width
+        if fx == 1:
+            mix = 1.0 if int(clock * 2) % 2 == 0 else 0.08
+            rgb = [int(channel * mix) for channel in primary]
+        elif fx == 2:
+            mix = 0.25 + 0.75 * (0.5 + 0.5 * _wave(clock * 2))
+            rgb = [int(channel * mix) for channel in primary]
+        elif fx == 3:
+            head = (clock * 0.35) % 1
+            mix = max(0.0, 1 - abs(phase - head) * width / 3)
+            rgb = [int(primary[channel] * mix + secondary[channel] * (1 - mix)) for channel in range(3)]
+        elif fx == 4:
+            rgb = _hue(phase + clock * 0.2)
+        elif fx in {5, 7}:
+            head = int(clock * 4) % width
+            rgb = primary if index == head else secondary
+        elif fx == 6:
+            rgb = primary if (index + int(clock * 3)) % 3 else secondary
+        else:
+            rgb = list(primary)
+        pixels.append([max(0, min(255, int(channel * level / 255))) for channel in rgb])
+    return pixels
+
+
+def _wave(value: float) -> float:
+    return math.sin(value)
+
+
+def _hue(value: float) -> list[int]:
+    red, green, blue = colorsys.hsv_to_rgb(value % 1, 0.85, 1)
+    return [int(red * 255), int(green * 255), int(blue * 255)]
+
+
 def version_from_filename(name: str | None) -> str | None:
     if not name:
         return None
@@ -232,6 +308,19 @@ def build_app(device: MockDevice) -> FastAPI:
     @app.get("/json/info")
     async def info() -> dict:
         return device.info()
+
+    @app.get("/json/eff")
+    async def effects() -> list[str]:
+        return EFFECTS
+
+    @app.get("/json/pal")
+    async def palettes() -> list[str]:
+        return PALETTES
+
+    @app.get("/json/live")
+    async def live() -> dict:
+        colors = device.live_colors()
+        return {"leds": colors, "n": len(colors)}
 
     @app.get("/json/state")
     async def get_state() -> dict:
