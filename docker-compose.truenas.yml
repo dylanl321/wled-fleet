@@ -1,0 +1,32 @@
+# Paste this into TrueNAS SCALE → Apps → Discover Apps → Custom App.
+# Replace the image name with the one you pushed (see scripts/publish).
+# Replace the volume path with your dataset. Host networking is required for mDNS.
+# Port 8787 must be free on the NAS.
+
+services:
+  wled-fleet:
+    image: docker.io/YOURUSER/wled-fleet:latest
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      PORT: "8787"
+      TZ: America/New_York
+      PUID: "568"
+      PGID: "568"
+      DATA_DIR: /data
+      ADMIN_PASSWORD: ""
+      SCAN_SUBNETS: ""
+      EXTRA_HOSTS: ""
+      BACKUP_INTERVAL: "86400"
+      BACKUP_WATCH_INTERVAL: "900"
+      BACKUP_RETENTION: "30"
+      DISCOVERY_INTERVAL: "60"
+      PRESENCE_INTERVAL: "20"
+    volumes:
+      - /mnt/tank/apps/wled-fleet:/data
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

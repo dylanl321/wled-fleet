@@ -1,6 +1,6 @@
-# TrueNAS SCALE / home-server compose.
-# Host networking lets the app hear WLED's mDNS advertisements.
-# Map DATA_PATH at a dataset owned by PUID:PGID (TrueNAS apps user is often 568).
+# Local or same-machine compose. This file builds from the repo checkout.
+# TrueNAS Custom App cannot see that checkout. Paste docker-compose.truenas.yml
+# after ./scripts/publish pushes an image. Host networking hears WLED mDNS.
 
 services:
   wled-fleet:

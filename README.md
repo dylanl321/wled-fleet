@@ -50,17 +50,27 @@ pytest
 
 ## TrueNAS SCALE
 
-1. Create a dataset, for example `/mnt/tank/apps/wled-fleet`.
-2. Give that dataset to the user the container will run as. The Apps user on SCALE is usually uid `568` and gid `568`. If you set `PUID` and `PGID`, the container starts as root, gives `/data` to that user, then drops privileges.
-3. Install a Custom App and paste the compose below, or point the app at `docker-compose.yml` in this repo. `network_mode: host` is what lets the container hear mDNS on the LAN. On SCALE 24.10 and later this is Apps → Discover → Custom App, then the Install via YAML / compose box.
-4. Set `DATA_PATH` to the dataset, `TZ` to your timezone, and `ADMIN_PASSWORD` if the NAS is reachable beyond your own Wi-Fi.
-5. Publish an image with the GitHub Action in this repo (it builds `linux/amd64` and `linux/arm64` and pushes to GHCR), or build `wled-fleet:local` on a machine that can run `docker compose build`. The first GHCR package is private until you make it public or give the NAS a registry login.
-6. Open `http://<truenas-ip>:8787` from a phone on the LAN.
+This repo is private on Origin, so nothing here publishes an image on its own. TrueNAS Custom Apps pull an image. They do not build from this checkout. Build once on a computer that has Docker and this repo, push to Docker Hub, then paste the compose below.
+
+SCALE 24.10 and later (the Docker-based Apps screen) is the version this is for.
+
+1. On your computer, from this repo, log in and publish. `YOURUSER` is your Docker Hub username. TrueNAS SCALE is amd64, and the script builds that even from an Apple Silicon Mac.
+
+```bash
+docker login
+./scripts/publish docker.io/YOURUSER/wled-fleet:latest
+```
+
+A public Docker Hub repository is enough. The image contains no passwords. If you leave the repository private, add that Docker Hub login under TrueNAS **Apps → Configuration → Container Registries** before the next step, or the NAS cannot pull it.
+
+2. On TrueNAS, create a dataset `tank/apps/wled-fleet` (the path will be `/mnt/tank/apps/wled-fleet`). The Apps user is uid `568`. The container starts as root, gives `/data` to `PUID`/`PGID` 568, then drops privileges. You can leave the dataset owned by root.
+
+3. **Apps → Discover Apps → Custom App**. Name it `wled-fleet`. Paste this. Change `YOURUSER`, the timezone, and the dataset path if yours is not `tank`.
 
 ```yaml
 services:
   wled-fleet:
-    image: ghcr.io/YOUR_USER/wled-fleet:latest
+    image: docker.io/YOURUSER/wled-fleet:latest
     network_mode: host
     restart: unless-stopped
     environment:
@@ -71,14 +81,21 @@ services:
       DATA_DIR: /data
       ADMIN_PASSWORD: ""
       SCAN_SUBNETS: ""
+      EXTRA_HOSTS: ""
       BACKUP_INTERVAL: "86400"
       BACKUP_WATCH_INTERVAL: "900"
       BACKUP_RETENTION: "30"
+      DISCOVERY_INTERVAL: "60"
+      PRESENCE_INTERVAL: "20"
     volumes:
       - /mnt/tank/apps/wled-fleet:/data
 ```
 
-Port `8787` has to be free on the NAS because host networking does not remap ports.
+The same file is `docker-compose.truenas.yml`. Port `8787` has to be free on the NAS, because host networking does not remap it.
+
+4. Install, then open `http://<truenas-ip>:8787` from a phone on the LAN.
+
+To update later, run `./scripts/publish docker.io/YOURUSER/wled-fleet:latest` again and restart the app on the NAS so it pulls the new `latest`.
 
 ### If the controllers never appear
 

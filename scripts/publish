@@ -1,0 +1,27 @@
+#!/bin/sh
+# Build WLED Fleet for TrueNAS SCALE (linux/amd64) and push it to a registry.
+# Usage: ./scripts/publish docker.io/YOURUSER/wled-fleet:latest
+# Log in first: docker login
+set -eu
+
+IMAGE=${1:-}
+if [ -z "$IMAGE" ]; then
+  echo "Usage: ./scripts/publish docker.io/YOURUSER/wled-fleet:latest" >&2
+  echo "Log in first with: docker login" >&2
+  exit 1
+fi
+
+PLATFORM=${PLATFORM:-linux/amd64}
+cd "$(dirname "$0")/.."
+
+echo "Building $IMAGE for $PLATFORM"
+if docker buildx version >/dev/null 2>&1; then
+  docker buildx build --platform "$PLATFORM" -t "$IMAGE" --push .
+else
+  echo "buildx is not available; building for this machine's architecture and pushing that." >&2
+  docker build -t "$IMAGE" .
+  docker push "$IMAGE"
+fi
+
+echo "Pushed $IMAGE"
+echo "On TrueNAS, set image: $IMAGE in the Custom App compose."
