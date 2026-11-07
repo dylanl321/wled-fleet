@@ -2,36 +2,82 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
-  <meta name="theme-color" content="#101311">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content, user-scalable=no">
+  <meta name="theme-color" content="#0B0B0D">
   <meta name="color-scheme" content="dark">
   <meta name="robots" content="noindex">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="WLED Fleet">
-  <title>WLED Fleet</title>
+  <meta name="apple-mobile-web-app-title" content="Lumen">
+  <title>Lumen</title>
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/static/styles.css">
-  <style>html,body{background:#101311;color:#f4f0e6;margin:0}</style>
+  <style>html,body{background:#0B0B0D;color:#E8E8EA;margin:0}</style>
 </head>
 <body>
-  <div id="app" class="app">
-    <header class="topbar"><span class="mark"></span><h1>WLED Fleet</h1></header>
-    <div class="stage">
-      <section class="pane" data-pane="control"></section>
-      <section class="pane" data-pane="devices" hidden></section>
-      <section class="pane" data-pane="firmware" hidden></section>
-      <section class="pane" data-pane="events" hidden></section>
-      <section class="pane" data-pane="settings" hidden></section>
-      <section class="pane" data-pane="stack" hidden></section>
+  <div id="app">
+    <main id="home" class="home">
+      <header id="status" class="status">
+        <span id="property" class="property">All lights</span>
+        <button id="attention" class="attention" hidden aria-label="Needs attention"></button>
+      </header>
+      <div id="banner" class="banner" hidden></div>
+      <div id="favorites" class="favorites" hidden></div>
+      <div id="zones" class="zones"></div>
+    </main>
+
+    <div id="handle" class="handle" aria-hidden="true">
+      <div class="grab"></div>
+      <div class="handle-row">
+        <div id="handle-swatches" class="handle-swatches"></div>
+        <button id="handle-label" class="handle-label"></button>
+      </div>
     </div>
-    <div id="dock-slot"></div>
-    <div id="tab-slot"></div>
-    <div id="sheet-slot"></div>
+
+    <div id="scrim" class="scrim"></div>
+    <section id="sheet" class="sheet" aria-label="Paint" aria-hidden="true">
+      <div class="sheet-grab" id="sheet-grab"><div class="grab"></div></div>
+      <div class="sel-head" id="sel-head">
+        <button class="sel-stack" id="sel-stack" aria-label="Back to lights"></button>
+        <button class="chip" id="sel-all">All</button>
+      </div>
+      <div class="tray-wrap" id="tray-wrap">
+        <div class="tray" id="tray"></div>
+        <div class="tray-note" id="tray-note"></div>
+      </div>
+      <div class="band-wrap" id="band-wrap" hidden>
+        <canvas class="band" id="band"></canvas>
+        <div class="band-knob" id="band-knob"></div>
+        <div class="sat-row"><input type="range" id="sat" min="0" max="100" value="100" aria-label="Saturation"></div>
+        <button class="chip ghost" id="band-back">Looks</button>
+      </div>
+      <div class="dials" id="dials">
+        <div class="dial" data-dial="bri"><span class="dial-label">Brightness</span><span class="dial-value" data-value></span><div class="track"><canvas class="track-ribbon"></canvas><div class="fill"></div><div class="thumb"></div></div></div>
+        <div class="dial" data-dial="sx"><span class="dial-label">Speed</span><span class="dial-value" data-value></span><div class="track"><div class="fill"></div><div class="thumb"></div></div></div>
+        <div class="dial small" data-dial="ix"><span class="dial-label">Intensity</span><span class="dial-value" data-value></span><div class="track"><div class="fill"></div><div class="thumb"></div></div></div>
+      </div>
+      <div class="more" id="more">
+        <h3>Palette</h3>
+        <div class="palettes" id="palettes"></div>
+        <h3>Colors</h3>
+        <div class="dots" id="dots"></div>
+        <h3>Effect</h3>
+        <div class="effects" id="effects"></div>
+        <div class="more-actions">
+          <button class="wide" id="save-look">Save as Look</button>
+          <button class="wide" id="save-fav">Save as Favorite</button>
+        </div>
+      </div>
+    </section>
+
+    <div id="pill" class="pill" role="status"></div>
+    <section id="screen" class="screen" hidden></section>
+    <div id="menu" class="menu" hidden></div>
   </div>
+  <script src="/static/fx.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>

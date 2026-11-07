@@ -1,41 +1,66 @@
 # WLED Fleet
 
-WLED Fleet keeps a house full of [WLED](https://kno.wled.ge) controllers backed up and reachable from a phone. It runs unattended on the LAN, finds controllers by itself, stores their config and presets, and flashes firmware only when you tell it to.
+The phone app is **Lumen**: a remote for the light the house is already making. The server behind it (WLED Fleet) keeps a house full of [WLED](https://kno.wled.ge) controllers found, backed up, and on the firmware you chose, out of sight.
 
-The phone UI is the whole product. Control is the first page: pick a group (or leave it on All) and tap Warm, Night, Bright, or Rainbow to send that look to every board. Turn on, turn off, and Back up are the same kind of single tap. Undo puts the previous look back. Effect, palette, speed, and groups live under More.
+Open it and every strip is on screen as a live ribbon of its real pixels, grouped the way you think about the house. Tap a ribbon and paint it: scroll the Look tray and the real lights follow your thumb, lift to keep it. Drag across a ribbon to dim it, flick it to turn it off. There are no boards, tabs, or Refresh buttons on Home. Boards, backups, and firmware live behind one Maintenance screen that only speaks up when something needs you.
 
-![Control, with both boards and the looks in reach of a thumb](docs/screenshots/phone-control.png)
+<p>
+<img src="docs/screenshots/lumen-home.png" width="260" alt="Home: live ribbons grouped by zone, favorites on top">
+<img src="docs/screenshots/lumen-paint.png" width="260" alt="Paint: the Look tray over Home, the selected strip previewing Aurora">
+<img src="docs/screenshots/lumen-find.png" width="260" alt="Find: one board's outputs with a ruler that lights LEDs 10 to 30 on the real strip">
+</p>
 
-## What it does
+## How it is organized
+
+Three nouns, all stored on the server:
+
+- **Light**: one WLED segment on one board, the strip you would point at and name ("Porch rail"). A two-output Dig-Uno is two Lights. Power and brightness are written to that segment only, so its sibling keeps running.
+- **Zone**: a named set of Lights, shown as a header on Home. Make one by dragging a ribbon onto another, or by multi-selecting and tapping the handle.
+- **Look**: effect, palette, colors, speed, and intensity, stored by effect name. Each board resolves the name against its own effect list when the Look is applied, and uses the Look's fallback effect if its firmware does not have it. About two dozen curated Looks ship with it. Brightness is not part of a Look.
+
+A **Favorite** is a saved selection with its Looks and brightness ("Movie night", "All off"), shown as a row on Home once you save one.
+
+## What happens where
+
+- **Home** lists every Light as a ribbon. Tap selects it and opens Paint. Long-press adds it to a multi-selection; long-press and drag reorders, across zones too. Long-press the name to rename it in place. Drag sideways to set brightness, flick right to toggle power, double-tap to flash the real strip three times. Every change shows an Undo pill for four seconds; a two-finger swipe down also undoes.
+- **Paint** is a sheet over Home. The Look tray previews the centered Look on the real lights while you scroll (at most every 150 ms, or every 400 ms for more than 8 lights) and commits it when the scroll settles, with a 400 ms transition on the strip that matches the sweep on screen. Solid opens a warm-to-cool-white and hue band. Brightness, speed, and intensity sit below. Pull the sheet up for palette, the three colors, an alphabetical effect list, Save as Look, and Save as Favorite.
+- **Find** (from Maintenance) shows one board: flash it, see each output live with a ruler, tap ticks to light that span on the real strip, light only one output, set the output's length, and name each output with its zone. A new board stays off Home until it is named here.
+- **Maintenance** opens from the top line of Home. Needs attention (offline, new, firmware due), boards (rename, reboot, back up, backups and restore, update firmware, forget), firmware files, and server settings.
+
+## Live view without overloading the boards
+
+WLED streams its pixels over its WebSocket after `{"lv":true}`, but [only one client receives that stream at a time](https://kno.wled.ge/interfaces/websocket/), and every socket costs RAM on the controller (WLED keeps up to 8 clients on ESP32 and 3 on ESP8266). So the server is the one live-view client of every board. It holds one socket per board, takes the binary `L` frames (or polls `/json/live` when the socket is not available), and sends each phone one stream: every Light's slice of its board's frame, 10 frames per second for ribbons on screen and 1 per second for the rest, averaged in linear light when a strip is longer than the ribbon. Board links run only while a phone is watching.
+
+Phones send their changes over the same socket, so a preview cannot overtake the commit after it. The server applies them optimistically and keeps one request in flight per board, merging newer changes into the next request (one write per 200 ms on ESP8266). If a board is unreachable, the newest change waits and is sent when it answers again.
+
+The app paints its last screen from local storage before the network answers, so reopening never shows a spinner. Frames older than ten minutes are shown desaturated until fresh ones arrive.
+
+## Backups and firmware (the server's job)
 
 - Listens for `_wled._tcp` and `_http._tcp`, and sweeps any subnets you configure by requesting `/json/info`. Controllers are tracked by MAC, so a DHCP address change does not create a second device. A controller that already knows its neighbors (`/json/nodes`) is asked for them too.
 - Saves `/cfg.json`, `/presets.json`, and `/json/info` as soon as a controller is found, every day after that, and again when the config changes. Identical configs are not stored twice. Old copies are deleted past the retention count.
 - Lets you restore a chosen backup (current config is saved first), or download the files as a zip.
-- From the phone: on/off, brightness, color, presets, segments, LED lengths, rename, identify, reboot. Wi-Fi and the access point are shown and are not editable.
-- Firmware is per device or per profile (Dig-Uno ESP32, Dig-Uno ESP8266, Dig-Quad, generic ESP32, generic ESP8266). You can upload a `.bin` or pull one from the QuinLED or official WLED GitHub releases. The image header and the file name have to match the controller's chip, and a Dig-Uno file will not be offered to a Dig-Quad. A backup runs first. Nothing flashes on a schedule.
+- Firmware is per device or per profile (Dig-Uno ESP32, Dig-Uno ESP8266, Dig-Quad, generic ESP32, generic ESP8266). You can upload a `.bin`. The image header and the file name have to match the controller's chip, and a Dig-Uno file will not be offered to a Dig-Quad. A backup runs first. Nothing flashes on a schedule.
 
 ## Run the demo
 
-The demo starts the app and two mock controllers (an ESP32 Dig-Uno and an ESP8266 Dig-Uno). No lights required.
+The demo starts the app and three mock controllers: an ESP32 Dig-Uno and an ESP8266 Dig-Uno with two outputs each, and an unnamed board. No lights required. The mocks speak WLED's JSON API and its WebSocket live stream, with real effect and palette names.
 
 ```bash
 docker compose -f docker-compose.demo.yml up --build
 ```
 
-Then open [http://127.0.0.1:8787](http://127.0.0.1:8787) on your phone or computer. The shelf controller is probed directly. It tells the app about the porch controller, and both are backed up without any clicks.
-
-![Phone device list](docs/screenshots/phone-devices.png)
-
-![Controller page, with power and brightness in the thumb zone](docs/screenshots/phone-device.png)
+Then open [http://127.0.0.1:8787](http://127.0.0.1:8787) on your phone or computer. Boards that already have a name in WLED become Lights on their own. The unnamed one waits in Maintenance until you name its output in Find.
 
 Without Docker:
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install -r requirements.txt
-MOCK_PORT=9091 MOCK_PEERS=127.0.0.1:9092 python -m mock.wled_mock &
+MOCK_PORT=9091 MOCK_PEERS=127.0.0.1:9092 MOCK_OUTPUTS="Shelf top:75,Shelf bottom:75" python -m mock.wled_mock &
 MOCK_PORT=9092 MOCK_MAC=b2c3d4e5f607 MOCK_NAME="Dig-Uno Porch" \
   MOCK_ARCH=esp8266 MOCK_RELEASE=ESP8266 MOCK_VERSION=0.14.4 MOCK_LEDS=60 \
+  MOCK_OUTPUTS="Porch rail:40,Porch ceiling:20" \
   MOCK_MDNS_NAME=dig-uno-porch python -m mock.wled_mock &
 DATA_DIR=./data EXTRA_HOSTS=127.0.0.1:9091 DISCOVERY_INTERVAL=8 \
   PRESENCE_INTERVAL=5 BACKUP_WATCH_INTERVAL=15 python -m app
@@ -172,6 +197,8 @@ tls/              optional cert.pem and key.pem
 
 ## Development
 
-Python 3.12, FastAPI, and SQLite. The UI is one stylesheet and one script, cached by the service worker with network-first so a phone on LAN Wi-Fi still opens if the last copy is already on the device.
+Python 3.12, FastAPI, and SQLite. The UI is plain HTML, one stylesheet, and two scripts with no build step: `app/static/app.js` (screens and gestures) and `app/static/fx.js` (effect sketches for swatches and for the instant on-screen prediction of a change, matched to `mock/render.py`). The service worker caches them network-first so a phone on LAN Wi-Fi still opens if the last copy is already on the device.
+
+Server modules: `app/lumen.py` (Lights, Zones, Looks, Favorites, the optimistic per-board writer, and Find), `app/live.py` (board live-view sockets and the phone stream), `app/starter_looks.py`. `tests/test_lumen.py` drives the mocks through segment-only writes, master and sibling brightness, effect fallback, zones, favorites, and a Find span and restore.
 
 Discovery parsing, backup dedupe, and firmware compatibility are covered by `pytest`. `tests/test_flow.py` boots the mock controller, discovers it (including the neighbor it advertises), backs it up, renames it, changes color and LED count, refuses an ESP8266 image on the ESP32 mock, and flashes a matching image.

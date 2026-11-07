@@ -159,3 +159,80 @@ class SceneApplyIn(BaseModel):
 
 class SyncIn(BaseModel):
     enabled: bool
+
+
+class LightChangeIn(BaseModel):
+    light: int
+    on: bool | None = None
+    bri: int | None = Field(default=None, ge=0, le=255)
+    look_id: int | None = None
+    look: dict | None = None
+
+
+class LightsApplyIn(BaseModel):
+    changes: list[LightChangeIn] = Field(min_length=1, max_length=200)
+    preview: bool = False
+    tt: int | None = Field(default=None, ge=0, le=255)
+
+
+class NameIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+
+
+class ZoneIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    light_ids: list[int] = Field(default_factory=list, max_length=200)
+
+
+class ZonePatchIn(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=40)
+    collapsed: bool | None = None
+
+
+class LayoutLightIn(BaseModel):
+    id: int
+    zone_id: int | None = None
+
+
+class LayoutIn(BaseModel):
+    zones: list[int] = Field(default_factory=list, max_length=200)
+    lights: list[LayoutLightIn] = Field(default_factory=list, max_length=500)
+
+
+class LookSaveIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    body: dict
+
+
+class FavoriteIn(BaseModel):
+    name: str = Field(min_length=1, max_length=40)
+    items: list[LightChangeIn] = Field(min_length=1, max_length=200)
+
+
+class SetupOutputIn(BaseModel):
+    seg: int = Field(ge=0, le=32)
+    name: str = Field(default="", max_length=40)
+    zone_id: int | None = None
+
+
+class SetupIn(BaseModel):
+    outputs: list[SetupOutputIn] = Field(min_length=1, max_length=32)
+
+
+class SpanIn(BaseModel):
+    seg: int | None = Field(default=None, ge=0, le=32)
+    start: int = Field(ge=0, le=8192)
+    stop: int = Field(ge=0, le=8192)
+
+
+class SoloIn(BaseModel):
+    seg: int = Field(ge=0, le=32)
+
+
+class LengthIn(BaseModel):
+    count: int = Field(ge=1, le=8192)
+
+
+class SegLengthIn(BaseModel):
+    seg: int = Field(ge=0, le=32)
+    count: int = Field(ge=1, le=8192)

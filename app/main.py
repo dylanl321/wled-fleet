@@ -9,7 +9,7 @@ from pathlib import Path
 
 import httpx
 import uvicorn
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -21,8 +21,22 @@ from app.diffutil import json_diff, mask_secrets
 from app.discovery import normalize_mac
 from app.errors import FleetError
 from app.fleet import Fleet
+from app.live import Hub
+from app.lumen import Lumen
 from app.util import clean_name
 from app.schemas import (
+    FavoriteIn,
+    LayoutIn,
+    LengthIn,
+    LightsApplyIn,
+    LookSaveIn,
+    NameIn,
+    SegLengthIn,
+    SetupIn,
+    SoloIn,
+    SpanIn,
+    ZoneIn,
+    ZonePatchIn,
     ApplyIn,
     BinAssignIn,
     CheckIn,
@@ -143,6 +157,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.db = db
         app.state.http = http
         app.state.fleet = fleet
+        lumen = Lumen(fleet)
+        hub = Hub(fleet, lumen)
+        fleet.lumen = lumen
+        app.state.lumen = lumen
+        app.state.hub = hub
         app.state.session_secret = load_secret(settings.data_dir / "session.key")
         app.state.login_failures = {}
         tasks = [asyncio.create_task(fleet.run_jobs())]
@@ -153,6 +172,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             fleet.stop()
+            hub.stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -656,6 +676,145 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             macs = group["macs"]
         results = await apply_look(fleet, _macs(request, macs), scene["look"], body.sync)
         return {"results": results}
+
+    # ----- Lumen: Lights, Zones, Looks, Favorites ------------------------
+
+    def lumen_of(request: Request) -> Lumen:
+        return request.app.state.lumen
+
+    def require_light(lumen: Lumen, light_id: int) -> dict:
+        return lumen.light_row(light_id)
+
+    @app.get("/api/home")
+    async def home(request: Request) -> dict:
+        lumen = lumen_of(request)
+        lumen.schedule_refresh()
+        return lumen.home()
+
+    @app.websocket("/api/stream")
+    async def stream(socket: WebSocket) -> None:
+        if settings.admin_password and not session_valid(
+            socket.cookies.get(COOKIE), socket.app.state.session_secret, settings.admin_password
+        ):
+            await socket.close(code=4401)
+            return
+        await socket.app.state.hub.serve(socket)
+
+    @app.post("/api/lights/apply")
+    async def lights_apply(body: LightsApplyIn, request: Request) -> dict:
+        changes = [change.model_dump(exclude_none=True) for change in body.changes]
+        return await lumen_of(request).apply(changes, preview=body.preview, transition=body.tt)
+
+    @app.patch("/api/lights/{light_id}")
+    async def light_rename(light_id: int, body: NameIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a name.")
+        return lumen_of(request).rename_light(light_id, name)
+
+    @app.post("/api/lights/{light_id}/identify")
+    async def light_identify(light_id: int, request: Request) -> dict:
+        lumen = lumen_of(request)
+        require_light(lumen, light_id)
+        asyncio.create_task(lumen.identify_light(light_id))
+        return {"ok": True}
+
+    @app.post("/api/lights/{light_id}/length")
+    async def light_length(light_id: int, body: LengthIn, request: Request) -> dict:
+        return await lumen_of(request).set_length(light_id, body.count)
+
+    @app.post("/api/zones")
+    async def zone_create(body: ZoneIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a zone name.")
+        return lumen_of(request).create_zone(name, body.light_ids)
+
+    @app.patch("/api/zones/{zone_id}")
+    async def zone_update(zone_id: int, body: ZonePatchIn, request: Request) -> dict:
+        name = clean_name(body.name) if body.name is not None else None
+        return lumen_of(request).update_zone(zone_id, name, body.collapsed)
+
+    @app.delete("/api/zones/{zone_id}")
+    async def zone_delete(zone_id: int, request: Request) -> dict:
+        lumen_of(request).delete_zone(zone_id)
+        return {"ok": True}
+
+    @app.put("/api/layout")
+    async def layout(body: LayoutIn, request: Request) -> dict:
+        lumen_of(request).set_layout(body.zones, [item.model_dump() for item in body.lights])
+        return {"ok": True}
+
+    @app.post("/api/looks")
+    async def look_save(body: LookSaveIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a look name.")
+        return lumen_of(request).save_look(name, body.body)
+
+    @app.delete("/api/looks/{look_id}")
+    async def look_delete(look_id: int, request: Request) -> dict:
+        lumen_of(request).delete_look(look_id)
+        return {"ok": True}
+
+    @app.post("/api/favorites")
+    async def favorite_save(body: FavoriteIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a name.")
+        return lumen_of(request).save_favorite(name, [item.model_dump(exclude_none=True) for item in body.items])
+
+    @app.delete("/api/favorites/{favorite_id}")
+    async def favorite_delete(favorite_id: int, request: Request) -> dict:
+        lumen_of(request).delete_favorite(favorite_id)
+        return {"ok": True}
+
+    @app.post("/api/favorites/{favorite_id}/apply")
+    async def favorite_apply(favorite_id: int, request: Request) -> dict:
+        return await lumen_of(request).apply_favorite(favorite_id)
+
+    @app.put("/api/property")
+    async def property_name(body: NameIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a name.")
+        lumen_of(request).set_property_name(name)
+        lumen_of(request).notify({"t": "layout"})
+        return {"ok": True}
+
+    @app.get("/api/firmware/pending")
+    async def firmware_pending(request: Request) -> list[dict]:
+        return lumen_of(request).firmware_pending()
+
+    @app.get("/api/boards")
+    async def boards(request: Request) -> list[dict]:
+        return lumen_of(request).boards()
+
+    @app.post("/api/boards/{mac}/setup")
+    async def board_setup(body: SetupIn, request: Request, mac: str = Depends(require_mac)) -> dict:
+        return lumen_of(request).setup_board(mac, [item.model_dump() for item in body.outputs])
+
+    @app.post("/api/boards/{mac}/flash")
+    async def board_flash(request: Request, mac: str = Depends(require_mac)) -> dict:
+        return await lumen_of(request).flash_board(mac)
+
+    @app.post("/api/boards/{mac}/span")
+    async def board_span(body: SpanIn, request: Request, mac: str = Depends(require_mac)) -> dict:
+        if body.stop < body.start:
+            raise HTTPException(status_code=400, detail="The span ends before it starts.")
+        return await lumen_of(request).span(mac, body.seg, body.start, body.stop)
+
+    @app.post("/api/boards/{mac}/solo")
+    async def board_solo(body: SoloIn, request: Request, mac: str = Depends(require_mac)) -> dict:
+        return await lumen_of(request).solo(mac, body.seg)
+
+    @app.post("/api/boards/{mac}/length")
+    async def board_length(body: SegLengthIn, request: Request, mac: str = Depends(require_mac)) -> dict:
+        return await lumen_of(request).set_segment_length(mac, body.seg, body.count)
+
+    @app.post("/api/boards/{mac}/release")
+    async def board_release(request: Request, mac: str = Depends(require_mac)) -> dict:
+        return await lumen_of(request).release(mac)
 
     if (STATIC).exists():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")

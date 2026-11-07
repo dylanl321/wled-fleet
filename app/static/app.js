@@ -1,2504 +1,2710 @@
+// Lumen: a remote for the light the house is already making.
+// Home is live ribbons grouped by Zone. Paint is a sheet over Home. Find and
+// Maintenance are pushed screens you visit about once a month.
 (function () {
-  const root = document.getElementById("app");
-  const SWATCHES = [
-    ["Warm", 255, 170, 70],
-    ["Candle", 255, 120, 30],
-    ["White", 255, 255, 255],
-    ["Cool", 190, 210, 255],
-    ["Red", 230, 40, 40],
-    ["Green", 40, 190, 80],
-    ["Blue", 50, 90, 255],
-    ["Pink", 255, 60, 150],
-  ];
-  const state = {
-    session: { required: false, ok: true },
-    devices: [],
-    status: null,
-    live: null,
-    backups: [],
-    backup: null,
-    diff: null,
-    bins: [],
-    profiles: [],
-    releases: [],
-    events: [],
-    settings: null,
-    route: { name: "devices" },
-    sheet: null,
-    sheetReturn: null,
-    pending: null,
-    edits: null,
-    draftColor: { r: 255, g: 170, b: 70 },
-    control: null,
-    groupId: null,
-    picked: {},
-    look: { on: true, bri: 180, col: [[255, 170, 70], [40, 8, 0], [0, 0, 0]], fx: 0, pal: 0, sx: 128, ix: 128 },
-    lookCurrent: true,
-    skipped: {},
-    undo: null,
-    holdingUndo: false,
-    colorSlot: 0,
-    applyMarks: {},
-    selecting: false,
-    selected: {},
-    showForgotten: false,
-    job: null,
-    toast: "",
-    error: "",
-    hold: false,
-    booting: true,
-    repo: "",
-    installEvent: null,
-    renaming: "",
-    pickMac: "",
-    pickAt: 0,
-    justSelected: "",
-    flashUntil: {},
-    sections: null,
-    sectionTimer: 0,
-    lastLook: "",
-    groupDraft: null,
-    scrolls: {},
-    visiblePane: "",
+  "use strict";
+
+  const Fx = window.LumenFx;
+  const $ = (selector, root = document) => root.querySelector(selector);
+  const DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  const CACHE_KEY = "lumen.cache.v1";
+  const VIEW_KEY = "lumen.view.v1";
+  const PREVIEW_MS = 150;
+  const PREVIEW_MANY_MS = 400;
+  const MANY = 8;
+  const COMMIT_TT = 4; // 400 ms, sent to WLED so the strip and the screen move together
+  const SWEEP_MS = 400;
+
+  // ----- state ------------------------------------------------------------
+
+  const S = {
+    home: { property: "All lights", zones: [], lights: [], looks: [], favorites: [], attention: {}, effects: [], palettes: [] },
+    lights: new Map(),
+    selection: new Set(),
+    multi: false,
+    sheet: "closed", // closed | rest | full
+    socket: null,
+    connected: false,
+    everConnected: false,
+    seq: 0,
+    outbox: [],
+    screen: null,
+    cachedAt: 0,
+    frozenFrames: false,
   };
-  hydrateUi();
-  if (state.control || state.devices.length) state.booting = false;
-  let timer = 0;
-  let repeat = 0;
-  let repeated = false;
-  let loadGeneration = 0;
-  let controlGeneration = 0;
 
-  const SHEET_KEEP = { more: 1, effects: 1, palettes: 1, sections: 1, boards: 1, color: 1, customize: 1, tools: 1, group: 1, saved: 1 };
+  const frames = new Map(); // light id -> { prev, cur, tPrev, tCur }
+  const predictions = new Map(); // light id -> { look, bri, on, from, t0, dur, until, kind, dir }
+  const briHistory = new Map(); // light id -> [{t, v}]
+  const ribbonEls = new Map(); // light id -> { root, canvas, ctx, name, pct }
+  const visible = new Set();
+  let boardFrame = null; // { mac, data, t }
 
-  function hydrateUi() {
-    try {
-      const data = JSON.parse(localStorage.getItem("wled-fleet-ui") || "null");
-      if (!data || typeof data !== "object") return;
-      if (Array.isArray(data.devices)) state.devices = data.devices;
-      if (data.control && typeof data.control === "object") state.control = data.control;
-      if ("groupId" in data) state.groupId = data.groupId;
-      if (data.scrolls && typeof data.scrolls === "object") state.scrolls = data.scrolls;
-      if (data.skipped && typeof data.skipped === "object") state.skipped = data.skipped;
-      if (data.selected && typeof data.selected === "object") state.selected = data.selected;
-      if (data.sections && typeof data.sections === "object") state.sections = data.sections;
-      if (data.sheet && data.sheet.kind && SHEET_KEEP[data.sheet.kind]) state.sheet = data.sheet;
-      if (data.lastLook) state.lastLook = data.lastLook;
-      const hash = location.hash;
-      if (data.hash && (hash === "" || hash === "#" || hash === "#/")) history.replaceState(null, "", data.hash);
-    } catch (error) { /* private mode or an old value */ }
+  // ----- small helpers ---------------------------------------------------
+
+  function el(tag, attrs, ...children) {
+    const node = document.createElement(tag);
+    if (attrs) {
+      for (const [key, value] of Object.entries(attrs)) {
+        if (value == null || value === false) continue;
+        if (key === "class") node.className = value;
+        else if (key === "text") node.textContent = value;
+        else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+        else if (key === "style") node.setAttribute("style", value);
+        else node.setAttribute(key, value === true ? "" : value);
+      }
+    }
+    for (const child of children.flat()) {
+      if (child == null || child === false) continue;
+      node.append(child.nodeType ? child : document.createTextNode(String(child)));
+    }
+    return node;
   }
 
-  let persistTimer = 0;
-  function persistUi() {
-    clearTimeout(persistTimer);
-    persistTimer = setTimeout(() => {
-      try {
-        localStorage.setItem("wled-fleet-ui", JSON.stringify({
-          devices: state.devices,
-          control: state.control,
-          groupId: state.groupId,
-          scrolls: state.scrolls,
-          skipped: state.skipped,
-          selected: state.selected,
-          sections: state.sections,
-          sheet: state.sheet && SHEET_KEEP[state.sheet.kind] ? state.sheet : null,
-          lastLook: state.lastLook,
-          hash: location.hash || "#/",
-        }));
-      } catch (error) { /* private mode */ }
+  const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
+  const now = () => performance.now();
+  const pct = (bri) => Math.round((bri / 255) * 100);
+  const haptic = (kind) => {
+    if (!navigator.vibrate) return;
+    const ms = { light: 6, medium: 14, strong: 24, success: [10, 40, 16], warning: [24, 60, 24] }[kind] || 6;
+    try { navigator.vibrate(ms); } catch (_) { /* not allowed until first tap */ }
+  };
+
+  async function api(path, options = {}) {
+    const init = { credentials: "same-origin", ...options };
+    if (init.body && typeof init.body !== "string" && !(init.body instanceof FormData)) {
+      init.body = JSON.stringify(init.body);
+      init.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
+    }
+    const response = await fetch(path, init);
+    if (response.status === 401) {
+      showLogin();
+      throw new Error("Sign in required");
+    }
+    const text = await response.text();
+    let data = null;
+    try { data = text ? JSON.parse(text) : null; } catch (_) { data = text; }
+    if (!response.ok) throw new Error((data && data.detail) || `Request failed (${response.status})`);
+    return data;
+  }
+
+  function b64(text) {
+    const raw = atob(text);
+    const out = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+    return out;
+  }
+
+  function b64encode(bytes) {
+    let raw = "";
+    for (let i = 0; i < bytes.length; i++) raw += String.fromCharCode(bytes[i]);
+    return btoa(raw);
+  }
+
+  function lightLook(light) {
+    return { fx: light.fx, pal: light.pal, col: light.col, sx: light.sx, ix: light.ix };
+  }
+
+  function sameLook(a, b) {
+    return a && b && a.fx === b.fx && a.pal === b.pal && JSON.stringify(a.col) === JSON.stringify(b.col);
+  }
+
+  function selected() {
+    return [...S.selection].map((id) => S.lights.get(id)).filter(Boolean);
+  }
+
+  function lightCount(points) {
+    return Math.max(1, Math.min(points || 1, 120));
+  }
+
+  // ----- cache and view state -------------------------------------------
+
+  function saveCache() {
+    try {
+      const snapshot = {};
+      for (const [id, frame] of frames) if (frame.cur) snapshot[id] = b64encode(frame.cur);
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ home: S.home, frames: snapshot, at: Date.now() }));
+    } catch (_) { /* storage full or blocked */ }
+  }
+
+  function loadCache() {
+    try {
+      const raw = JSON.parse(localStorage.getItem(CACHE_KEY) || "null");
+      if (!raw || !raw.home) return false;
+      setHome(raw.home, { fromCache: true });
+      const t = now();
+      for (const [id, text] of Object.entries(raw.frames || {})) {
+        const data = b64(text);
+        frames.set(Number(id), { prev: data, cur: data, tPrev: t, tCur: t });
+      }
+      S.cachedAt = raw.at || 0;
+      S.frozenFrames = true;
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function saveView() {
+    try {
+      localStorage.setItem(VIEW_KEY, JSON.stringify({ sel: [...S.selection], multi: S.multi, sheet: S.sheet === "closed" ? "closed" : "rest" }));
+    } catch (_) { /* ignore */ }
+  }
+
+  function loadView() {
+    try {
+      const view = JSON.parse(localStorage.getItem(VIEW_KEY) || "null");
+      if (!view) return;
+      S.selection = new Set((view.sel || []).filter((id) => S.lights.has(id)));
+      S.multi = Boolean(view.multi) && S.selection.size > 0;
+      if (view.sheet !== "closed" && S.selection.size) openSheet("rest", true);
+    } catch (_) { /* ignore */ }
+  }
+
+  // ----- connection --------------------------------------------------------
+
+  let reconnectDelay = 500;
+  let bannerTimer = 0;
+
+  function connect() {
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    let socket;
+    try {
+      socket = new WebSocket(`${scheme}://${location.host}/api/stream`);
+    } catch (_) {
+      scheduleReconnect();
+      return;
+    }
+    S.socket = socket;
+    socket.onopen = () => {
+      S.connected = true;
+      S.everConnected = true;
+      reconnectDelay = 500;
+      clearTimeout(bannerTimer);
+      setBanner(null);
+      sendVisible();
+      const queued = S.outbox.splice(0);
+      for (const message of queued) socket.send(JSON.stringify(message));
+    };
+    socket.onmessage = (event) => {
+      let message;
+      try { message = JSON.parse(event.data); } catch (_) { return; }
+      onMessage(message);
+    };
+    socket.onclose = (event) => {
+      S.connected = false;
+      S.socket = null;
+      if (event.code === 4401) { showLogin(); return; }
+      clearTimeout(bannerTimer);
+      bannerTimer = setTimeout(() => { if (!S.connected) setBanner("Not connected to the house"); }, 1500);
+      scheduleReconnect();
+    };
+    socket.onerror = () => { try { socket.close(); } catch (_) { /* closed */ } };
+  }
+
+  function scheduleReconnect() {
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 1.7, 8000);
+  }
+
+  function send(message, { queue = false } = {}) {
+    if (S.socket && S.socket.readyState === 1) {
+      S.socket.send(JSON.stringify(message));
+      return true;
+    }
+    if (queue) S.outbox.push(message);
+    return false;
+  }
+
+  function onMessage(message) {
+    switch (message.t) {
+      case "home":
+        setHome(message.home);
+        break;
+      case "lights":
+        for (const view of message.lights || []) mergeLight(view);
+        refreshChrome();
+        break;
+      case "f": {
+        const t = now();
+        for (const [id, text] of Object.entries(message.f || {})) {
+          const key = Number(id);
+          const data = b64(text);
+          const frame = frames.get(key);
+          if (frame && !S.frozenFrames) frames.set(key, { prev: frame.cur, cur: data, tPrev: frame.tCur, tCur: t });
+          else frames.set(key, { prev: data, cur: data, tPrev: t - 100, tCur: t });
+        }
+        S.frozenFrames = false;
+        break;
+      }
+      case "bf":
+        boardFrame = { mac: message.mac, data: b64(message.f), t: now() };
+        break;
+      case "ack":
+        if (message.missing && message.missing.length) markMissing(message.missing);
+        break;
+      case "error":
+        toast(message.detail || "That change did not go through");
+        break;
+      case "drift":
+        break;
+      case "applied":
+        toast("Applied");
+        break;
+      default:
+        break;
+    }
+  }
+
+  function setBanner(text) {
+    const banner = $("#banner");
+    banner.hidden = !text;
+    banner.textContent = text || "";
+  }
+
+  // ----- model -------------------------------------------------------------
+
+  function setHome(home, { fromCache = false } = {}) {
+    const layoutBefore = layoutKey();
+    S.home = home;
+    const seen = new Set();
+    for (const view of home.lights || []) {
+      mergeLight(view, true);
+      seen.add(view.id);
+    }
+    for (const id of [...S.lights.keys()]) if (!seen.has(id)) S.lights.delete(id);
+    for (const id of [...S.selection]) if (!S.lights.has(id)) S.selection.delete(id);
+    if (layoutKey() !== layoutBefore || !$("#zones").childElementCount) renderHome();
+    else refreshRibbons();
+    renderFavorites();
+    renderStatus();
+    if (S.sheet !== "closed") renderSheet();
+    if (!fromCache) saveCache();
+  }
+
+  function mergeLight(view, quiet) {
+    const current = S.lights.get(view.id);
+    const merged = current ? Object.assign(current, view) : { ...view };
+    if (!current) S.lights.set(view.id, merged);
+    pushBri(view.id, merged.on ? merged.bri : 0);
+    if (!quiet) refreshRibbon(view.id);
+  }
+
+  function pushBri(id, value) {
+    const list = briHistory.get(id) || [];
+    const last = list[list.length - 1];
+    if (!last || last.v !== value) list.push({ t: now(), v: value });
+    while (list.length > 12) list.shift();
+    briHistory.set(id, list);
+  }
+
+  function briAt(id, t) {
+    const list = briHistory.get(id) || [];
+    let value = list.length ? list[0].v : 0;
+    for (const item of list) if (item.t <= t) value = item.v;
+    return value;
+  }
+
+  function layoutKey() {
+    const lights = [...S.lights.values()].map((l) => `${l.id}:${l.zone_id}:${l.position}:${l.name}`).join("|");
+    const zones = (S.home.zones || []).map((z) => `${z.id}:${z.name}:${z.position}:${z.collapsed}`).join("|");
+    return lights + "#" + zones;
+  }
+
+  function orderedLights(zoneId) {
+    return [...S.lights.values()]
+      .filter((l) => (l.zone_id || null) === (zoneId || null))
+      .sort((a, b) => a.position - b.position || a.id - b.id);
+  }
+
+  function zoneName(zoneId) {
+    const zone = (S.home.zones || []).find((z) => z.id === zoneId);
+    return zone ? zone.name : "";
+  }
+
+  function selectionLabel() {
+    const ids = [...S.selection];
+    if (!ids.length) return "";
+    if (ids.length === S.lights.size && ids.length > 1) return "All lights";
+    if (ids.length === 1) return S.lights.get(ids[0])?.name || "1 light";
+    for (const zone of S.home.zones || []) {
+      const members = orderedLights(zone.id).map((l) => l.id);
+      if (members.length === ids.length && members.every((id) => S.selection.has(id))) return zone.name;
+    }
+    return `${ids.length} lights`;
+  }
+
+  // ----- Home --------------------------------------------------------------
+
+  function renderStatus() {
+    $("#property").textContent = S.home.property || "All lights";
+    const attention = S.home.attention || {};
+    const count = (attention.offline || 0) + (attention.new || 0);
+    const button = $("#attention");
+    button.hidden = !count && !attention.firmware;
+    button.classList.toggle("up", !count && Boolean(attention.firmware));
+    button.textContent = count ? String(count) : "";
+  }
+
+  function renderFavorites() {
+    const row = $("#favorites");
+    const favorites = S.home.favorites || [];
+    row.hidden = !favorites.length;
+    row.replaceChildren(
+      ...favorites.map((fav) => {
+        const canvas = el("canvas", { width: 60, height: 60 });
+        const first = (fav.body.items || []).find((item) => item.look) || {};
+        canvas._look = first.look || null;
+        canvas._off = (fav.body.items || []).every((item) => item.on === false);
+        const pill = el("button", { class: "fav" }, canvas, fav.name);
+        bindPress(pill, {
+          tap: () => applyFavorite(fav),
+          long: () => favoriteMenu(fav),
+        });
+        return pill;
+      }),
+    );
+  }
+
+  function ribbonFor(light) {
+    let entry = ribbonEls.get(light.id);
+    if (entry) return entry;
+    const canvas = el("canvas");
+    const name = el("span", { class: "name" });
+    const pctLabel = el("span", { class: "pct" });
+    const root = el("div", { class: "ribbon", "data-id": light.id, role: "button" }, canvas, name, pctLabel);
+    entry = { root, canvas, ctx: canvas.getContext("2d"), name, pct: pctLabel, w: 0, h: 0 };
+    ribbonEls.set(light.id, entry);
+    bindRibbon(entry, light.id);
+    observer.observe(root);
+    return entry;
+  }
+
+  function renderHome() {
+    const zones = $("#zones");
+    const sections = [];
+    const zoneList = [...(S.home.zones || [])].sort((a, b) => a.position - b.position || a.id - b.id);
+    for (const zone of zoneList) {
+      const lights = orderedLights(zone.id);
+      if (!lights.length) continue;
+      sections.push(zoneSection(zone, lights));
+    }
+    const other = orderedLights(null);
+    if (other.length) sections.push(zoneSection(null, other));
+    if (!sections.length) {
+      sections.push(
+        el(
+          "div",
+          { class: "empty" },
+          el("strong", { text: S.everConnected || S.connected ? "No lights yet" : "Looking for the house…" }),
+          S.everConnected ? "New boards show up in Maintenance. Tap the top line to set one up." : "",
+        ),
+      );
+    }
+    zones.replaceChildren(...sections);
+    for (const [id, entry] of ribbonEls) {
+      if (!S.lights.has(id)) {
+        observer.unobserve(entry.root);
+        ribbonEls.delete(id);
+      }
+    }
+    refreshRibbons();
+    document.body.classList.toggle("selecting", S.selection.size > 0);
+  }
+
+  function zoneSection(zone, lights) {
+    const rows = el("div", { class: "rows" });
+    for (const light of lights) rows.append(ribbonFor(light).root);
+    const section = el("section", { class: "zone" + (zone && zone.collapsed ? " collapsed" : ""), "data-zone": zone ? zone.id : "" });
+    const name = el("button", { class: "zone-name", text: zone ? zone.name : "Other" });
+    if (!zone && !(S.home.zones || []).some((z) => orderedLights(z.id).length)) name.style.visibility = "hidden";
+    const bri = el("span", { class: "zone-bri num" });
+    const toggle = el("button", { class: "toggle", "aria-label": "Power" });
+    const fill = el("div", { class: "zone-fill" });
+    const head = el("div", { class: "zone-head" }, name, fill, bri, toggle);
+    section.append(head, rows);
+    section._update = () => {
+      const members = orderedLights(zone ? zone.id : null);
+      const lit = members.filter((l) => l.on);
+      bri.textContent = lit.length ? `${pct(lit.reduce((sum, l) => sum + l.bri, 0) / lit.length)}%` : "";
+      toggle.classList.toggle("on", lit.length > 0);
+    };
+    section._update();
+    name.addEventListener("click", () => {
+      if (!zone) return;
+      const collapsed = !section.classList.contains("collapsed");
+      section.classList.toggle("collapsed", collapsed);
+      zone.collapsed = collapsed;
+      api(`/api/zones/${zone.id}`, { method: "PATCH", body: { collapsed } }).catch(() => {});
+    });
+    bindPress(fill, {
+      tap: () => selectSet(orderedLights(zone ? zone.id : null).map((l) => l.id), true),
+      long: () => zone && zoneMenu(zone),
+    });
+    bindPress(bri, { tap: () => selectSet(orderedLights(zone ? zone.id : null).map((l) => l.id), true), long: () => zone && zoneMenu(zone) });
+    toggle.addEventListener("click", () => {
+      const members = orderedLights(zone ? zone.id : null);
+      const turnOn = !members.some((l) => l.on);
+      haptic("medium");
+      commit(members.map((l) => ({ light: l.id, on: turnOn })), {
+        label: `${zone ? zone.name : "Other"} ${turnOn ? "on" : "off"}`,
+        kind: "power",
+      });
+    });
+    return section;
+  }
+
+  function refreshRibbons() {
+    for (const id of S.lights.keys()) refreshRibbon(id);
+    refreshChrome();
+  }
+
+  function refreshRibbon(id) {
+    const light = S.lights.get(id);
+    const entry = ribbonEls.get(id);
+    if (!light || !entry) return;
+    if (!entry.editing) entry.name.textContent = light.name;
+    if (!entry.root.classList.contains("dragging-bri")) entry.pct.textContent = `${pct(light.bri)}%`;
+    entry.root.classList.toggle("off", !light.on);
+    entry.root.classList.toggle("offline", !light.online);
+    entry.root.classList.toggle("sel", S.selection.has(id));
+  }
+
+  function refreshChrome() {
+    document.querySelectorAll(".zone").forEach((section) => section._update && section._update());
+    document.body.classList.toggle("selecting", S.selection.size > 0);
+    for (const [id, entry] of ribbonEls) entry.root.classList.toggle("sel", S.selection.has(id));
+    renderHandle();
+    if (S.sheet !== "closed") updateDials();
+  }
+
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        const id = Number(entry.target.dataset.id);
+        if (entry.isIntersecting) visible.add(id);
+        else visible.delete(id);
+      }
+      sendVisible();
+    },
+    { root: null, rootMargin: "60px" },
+  );
+
+  let visTimer = 0;
+  function sendVisible() {
+    clearTimeout(visTimer);
+    visTimer = setTimeout(() => {
+      const ids = new Set(visible);
+      if (S.sheet !== "closed") for (const id of S.selection) ids.add(id);
+      send({ t: "vis", ids: [...ids], board: S.screen && S.screen.kind === "find" ? S.screen.mac : null });
     }, 60);
   }
 
-  function esc(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
-      "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
-    }[ch]));
-  }
+  // ----- drawing -----------------------------------------------------------
 
-  function compact(mac) {
-    return String(mac || "").replace(/:/g, "").toLowerCase();
-  }
+  const scratch = new Map();
 
-  function deviceBy(mac) {
-    const key = compact(mac);
-    return state.devices.find((item) => compact(item.mac) === key) || null;
-  }
-
-  function parseRoute() {
-    const parts = (location.hash || "#/").replace(/^#/, "").split("/").filter(Boolean);
-    if (!parts.length || parts[0] === "control") return { name: "control" };
-    if (parts[0] === "devices") return { name: "devices" };
-    if (parts[0] === "d" && parts[1]) return { name: "device", mac: parts[1] };
-    if (parts[0] === "firmware") return { name: "firmware" };
-    if (parts[0] === "events") return { name: "events" };
-    if (parts[0] === "settings") return { name: "settings" };
-    if (parts[0] === "backup" && parts[2]) return { name: "backup", mac: parts[1], id: parts[2] };
-    if (parts[0] === "diff" && parts[2]) return { name: "diff", mac: parts[1], id: parts[2] };
-    return { name: "devices" };
-  }
-
-  function clearRouteState(route) {
-    if (route.name === "device") {
-      state.live = null;
-      state.backups = [];
-    } else if (route.name === "backup") {
-      state.backup = null;
-    } else if (route.name === "diff") {
-      state.diff = null;
+  function buffer(key, size) {
+    let buf = scratch.get(key);
+    if (!buf || buf.length !== size) {
+      buf = new Float32Array(size);
+      scratch.set(key, buf);
     }
+    return buf;
   }
 
-  function ago(iso) {
-    if (!iso) return "no backup yet";
-    const then = new Date(iso).getTime();
-    if (Number.isNaN(then)) return iso;
-    const seconds = Math.max(0, (Date.now() - then) / 1000);
-    if (seconds < 60) return "just now";
-    if (seconds < 3600) return Math.floor(seconds / 60) + " min ago";
-    if (seconds < 86400) return Math.floor(seconds / 3600) + " hr ago";
-    return Math.floor(seconds / 86400) + " days ago";
-  }
-
-  function when(iso) {
-    const date = new Date(iso);
-    if (Number.isNaN(date.getTime())) return iso || "";
-    return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
-  }
-
-  function bytes(size) {
-    const n = Number(size) || 0;
-    if (n < 1024) return n + " B";
-    if (n < 1024 * 1024) return (n / 1024).toFixed(0) + " KB";
-    return (n / 1024 / 1024).toFixed(1) + " MB";
-  }
-
-  function reasonLabel(reason) {
-    return {
-      discover: "Found",
-      schedule: "Daily",
-      change: "Config change",
-      manual: "Manual",
-      "pre-update": "Before update",
-      "pre-restore": "Before restore",
-      "pre-change": "Before LED edit",
-    }[reason] || reason;
-  }
-
-  async function api(path, options) {
-    const opts = options || {};
-    const headers = { Accept: "application/json" };
-    if (opts.body && !(opts.body instanceof FormData)) headers["Content-Type"] = "application/json";
-    const response = await fetch(path, {
-      method: opts.method || "GET",
-      headers,
-      body: opts.body,
-      credentials: "same-origin",
-    });
-    if (response.status === 401) {
-      state.session = { required: true, ok: false };
-      render({ resetScroll: true });
-      throw new Error("Sign in required");
-    }
-    if (!response.ok) {
-      let detail = "Request failed";
-      try {
-        const body = await response.json();
-        detail = Array.isArray(body.detail) ? body.detail.map((item) => item.msg).join(" ") : (body.detail || detail);
-      } catch (error) { /* response had no json */ }
-      throw new Error(detail);
-    }
-    const type = response.headers.get("content-type") || "";
-    if (type.includes("application/json")) return response.json();
-    return response;
-  }
-
-  function toast(message) {
-    state.toast = message;
-    const existing = document.getElementById("toast");
-    if (existing) existing.remove();
-    const node = document.createElement("div");
-    node.id = "toast";
-    node.className = "toast";
-    node.setAttribute("role", "status");
-    node.textContent = message;
-    document.body.appendChild(node);
-    setTimeout(() => { if (state.toast === message) { state.toast = ""; node.remove(); } }, 3200);
-  }
-
-  function icon(name) {
-    const paths = {
-      control: '<path d="M12 3l1.6 4.8L18.5 9.5 13.6 11 12 16l-1.6-5L5.5 9.5 10.4 7.8z"/>',
-      devices: '<circle cx="8" cy="8" r="2.2"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/>',
-      firmware: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
-      events: '<path d="M5 16c2-6 4-6 6 0s4 6 6 0"/><circle cx="12" cy="12" r="9"/>',
-      settings: '<path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/>',
-    };
-    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">' + paths[name] + "</svg>";
-  }
-
-  function standalone() {
-    return window.matchMedia("(display-mode: standalone)").matches || window.navigator.standalone === true;
-  }
-
-  function showInstall() {
-    if (standalone() || localStorage.getItem("install-dismissed") === "1") return false;
-    return state.route.name === "devices" || state.route.name === "settings";
-  }
-
-  function canRepaint() {
-    if (state.sheet || state.hold || state.selecting) return false;
-    const el = document.activeElement;
-    return !(el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
-  }
-
-  function focusAction(reference) {
-    state.sheetReturn = null;
-    if (!reference || !reference.action) return;
-    setTimeout(() => {
-      const openers = document.querySelectorAll('[data-action="' + reference.action + '"]');
-      const opener = openers[reference.index];
-      if (opener) opener.focus();
-    });
-  }
-
-  function scrollKey() {
-    const route = state.route || { name: "control" };
-    let key = route.name || "control";
-    if (route.mac) key += ":" + route.mac;
-    if (route.id) key += ":" + route.id;
-    if (route.name === "control") key += ":" + (state.groupId == null ? "all" : state.groupId);
-    return key;
-  }
-
-  function routePane(route) {
-    const name = route && route.name;
-    if (name === "device" || name === "backup" || name === "diff") return "stack";
-    if (name === "control" || name === "devices" || name === "firmware" || name === "events" || name === "settings") return name;
-    return "devices";
-  }
-
-  function paneEl(name) {
-    return document.querySelector('.pane[data-pane="' + name + '"]');
-  }
-
-  function visiblePane() {
-    return document.querySelector(".pane:not([hidden])");
-  }
-
-  function rememberScroll(pane) {
-    if (!pane || pane.hidden) return;
-    const key = pane.dataset.scrollKey;
-    if (!key) return;
-    state.scrolls[key] = pane.scrollTop;
-  }
-
-  function showOnly(name) {
-    document.querySelectorAll(".pane").forEach((pane) => {
-      const on = pane.dataset.pane === name;
-      pane.hidden = !on;
-      if (!state.sheet && "inert" in pane) pane.inert = !on;
-    });
-  }
-
-  function syncInsets() {
-    const dock = document.getElementById("dock-slot");
-    document.documentElement.style.setProperty("--dock", ((dock && dock.offsetHeight) || 0) + "px");
-  }
-
-  function updateChrome() {
-    const current = document.querySelector(".topbar");
-    if (current) current.outerHTML = topbar();
-    const dock = document.getElementById("dock-slot");
-    const tabs = document.getElementById("tab-slot");
-    const sheet = document.getElementById("sheet-slot");
-    if (dock) dock.innerHTML = dockHtml();
-    if (tabs) tabs.innerHTML = state.selecting ? actionBar() : tabbar();
-    if (sheet) sheet.innerHTML = sheetHtml();
-    document.body.classList.toggle("sheet-open", Boolean(state.sheet));
-    document.querySelectorAll(".topbar, .stage, #dock-slot, #tab-slot").forEach((node) => {
-      node.inert = Boolean(state.sheet);
-    });
-    const deviceDock = state.route.name === "device" && !!(state.live && state.live.state);
-    document.body.classList.toggle("has-dock", deviceDock || state.route.name === "control");
-    document.body.classList.toggle("has-control", state.route.name === "control");
-    syncInsets();
-  }
-
-  function render(options) {
-    const hadSheet = document.body.classList.contains("sheet-open");
-    if (state.sheet && !hadSheet) {
-      const active = document.activeElement;
-      const action = active && active.dataset ? active.dataset.action : null;
-      if (action) {
-        const openers = Array.from(document.querySelectorAll('[data-action="' + action + '"]'));
-        state.sheetReturn = { action, index: openers.indexOf(active) };
+  // Pixels the ribbon should show right now, 0..255 floats, plus the point count.
+  function pixelsFor(light, t, target) {
+    const frame = frames.get(light.id);
+    const points = frame ? frame.cur.length / 3 : lightCount(light.len);
+    const out = target && target.length === points * 3 ? target : buffer(`p${light.id}`, points * 3);
+    const shown = light.on ? light.bri : 0;
+    if (frame && frame.cur.length) {
+      const span = clamp(frame.tCur - frame.tPrev, 60, 260);
+      let k = clamp((t - frame.tCur) / span, 0, 1);
+      const prev = frame.prev && frame.prev.length === frame.cur.length ? frame.prev : frame.cur;
+      let delta = 0;
+      for (let i = 0; i < frame.cur.length; i += 9) delta += Math.abs(frame.cur[i] - prev[i]);
+      if (delta / (frame.cur.length / 9) > 80) k = 1; // strobe-like: cut, do not smear
+      // Frames from the board lag what we sent; scale them to the brightness we show now.
+      const frameBri = briAt(light.id, t - 260);
+      let scale = 1;
+      if (frameBri > 0) scale = clamp(shown / frameBri, 0, 4);
+      else if (shown > 0) scale = -1;
+      if (scale < 0) {
+        Fx.render(lightLook(light), points, t / 1000, out);
+        const f = shown / 255;
+        for (let i = 0; i < out.length; i++) out[i] *= f;
       } else {
-        state.sheetReturn = null;
+        for (let i = 0; i < out.length; i++) out[i] = (prev[i] + (frame.cur[i] - prev[i]) * k) * scale;
       }
+    } else {
+      Fx.render(lightLook(light), points, t / 1000, out);
+      const f = shown / 255;
+      for (let i = 0; i < out.length; i++) out[i] *= f;
     }
-    const restoreAction = hadSheet && !state.sheet ? state.sheetReturn : null;
-    if (state.session.required && !state.session.ok) {
-      root.innerHTML = loginView();
-      state.visiblePane = "";
+    const pred = predictions.get(light.id);
+    if (pred) applyPrediction(light, pred, points, t, out);
+    return out;
+  }
+
+  function applyPrediction(light, pred, points, t, out) {
+    if (t > pred.until) {
+      predictions.delete(light.id);
       return;
     }
-    if (!document.querySelector(".stage")) {
-      root.innerHTML = topbar() + '<div class="stage">' +
-        ["control", "devices", "firmware", "events", "settings", "stack"].map((name) =>
-          '<section class="pane" data-pane="' + name + '" hidden></section>'
-        ).join("") +
-        '</div><div id="dock-slot"></div><div id="tab-slot"></div><div id="sheet-slot"></div>';
+    const predicted = buffer(`q${light.id}`, points * 3);
+    Fx.render(pred.look || lightLook(light), points, t / 1000, predicted);
+    const level = (pred.on === false ? 0 : pred.bri == null ? (light.on ? light.bri : 0) : pred.bri) / 255;
+    for (let i = 0; i < predicted.length; i++) predicted[i] *= level;
+    const from = pred.from && pred.from.length === predicted.length ? pred.from : null;
+    const elapsed = t - pred.t0;
+    const handOff = pred.until - 220;
+    if (elapsed < pred.dur && from) {
+      const p = elapsed / pred.dur;
+      const eased = p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2;
+      for (let i = 0; i < points; i++) {
+        const x = pred.dir < 0 ? 1 - (i + 0.5) / points : (i + 0.5) / points;
+        let w;
+        if (pred.kind === "sweep") w = clamp((eased * 1.15 - x) / 0.15, 0, 1);
+        else w = eased;
+        for (let c = 0; c < 3; c++) out[i * 3 + c] = from[i * 3 + c] + (predicted[i * 3 + c] - from[i * 3 + c]) * w;
+      }
+      return;
     }
-    const previous = visiblePane();
-    if (previous) rememberScroll(previous);
-    updateChrome();
-    const name = routePane(state.route);
-    const pane = paneEl(name);
-    if (!pane) return;
-    const html = body();
-    const stamp = name + "\n" + html;
-    const switching = state.visiblePane !== name;
-    const replace = pane.dataset.stamp !== stamp;
-    if (replace) {
-      pane.innerHTML = html;
-      pane.dataset.stamp = stamp;
+    if (t < handOff) {
+      out.set(predicted);
+      return;
     }
-    showOnly(name);
-    state.visiblePane = name;
-    pane.dataset.scrollKey = scrollKey();
-    const y = options && options.resetScroll ? 0 : (state.scrolls[scrollKey()] || 0);
-    pane.dataset.restored = String(y);
-    if (replace || switching || (options && options.resetScroll)) pane.scrollTop = y;
-    document.body.classList.toggle("sheet-open", Boolean(state.sheet));
-    paintLeds();
-    if (state.sheet) {
-      setTimeout(() => {
-        const sheet = document.querySelector(".sheet");
-        if (!sheet || sheet.contains(document.activeElement)) return;
-        const first = sheet.querySelector("[autofocus], input, button:not(.backdrop)");
-        if (first) first.focus();
+    const w = clamp((t - handOff) / 220, 0, 1);
+    for (let i = 0; i < out.length; i++) out[i] = predicted[i] + (out[i] - predicted[i]) * w;
+  }
+
+  function predict(ids, fields, { kind = "sweep", dur = SWEEP_MS, dir = 1, hold = 700 } = {}) {
+    const t = now();
+    for (const id of ids) {
+      const light = S.lights.get(id);
+      if (!light) continue;
+      const frame = frames.get(id);
+      const points = frame ? frame.cur.length / 3 : lightCount(light.len);
+      const snapshot = new Float32Array(points * 3);
+      pixelsFor(light, t, snapshot);
+      predictions.set(id, {
+        look: fields.look || (predictions.get(id) || {}).look || lightLook(light),
+        bri: fields.bri,
+        on: fields.on,
+        from: snapshot,
+        t0: t,
+        dur,
+        until: t + dur + hold,
+        kind,
+        dir,
       });
-    } else if (restoreAction) {
-      focusAction(restoreAction);
     }
   }
 
-  function shell() {
-    if (state.session.required && !state.session.ok) return loginView();
-    return topbar() + "<main>" + body() + "</main>" + dockHtml() + (state.selecting ? actionBar() : tabbar()) + sheetHtml();
-  }
-
-  function topbar() {
-    const route = state.route;
-    let title = "Devices";
-    let back = "";
-    if (route.name === "device" || route.name === "backup" || route.name === "diff") {
-      const device = deviceBy(route.mac);
-      title = device ? device.name : "Controller";
-      const href = route.name === "device" ? "#/devices" : "#/d/" + route.mac;
-      back = '<a class="back" href="' + href + '">Back</a>';
-    } else if (route.name === "control") title = "Control";
-    else if (route.name === "firmware") title = "Firmware";
-    else if (route.name === "events") title = "Activity";
-    else if (route.name === "settings") title = "Settings";
-    let action = '<button class="iconbtn" type="button" data-action="refresh">Refresh</button>';
-    if (route.name === "devices") {
-      action = '<button class="iconbtn" type="button" data-action="select-toggle">' + (state.selecting ? "Done" : "Select") + "</button>";
-    } else if (route.name === "control" && state.undo) {
-      action = '<button class="iconbtn" type="button" data-action="undo">Undo</button>';
+  function sizeCanvas(entry, canvas) {
+    const rect = canvas.getBoundingClientRect();
+    const w = Math.max(1, Math.round(rect.width * DPR));
+    const h = Math.max(1, Math.round(rect.height * DPR));
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
     }
-    return '<header class="topbar">' + back + '<span class="mark"></span><h1>' + esc(title) + "</h1>" + action + "</header>";
+    return [w, h];
   }
 
-  function dockHtml() {
-    if (state.route.name === "control") return controlDock();
-    if (state.route.name !== "device" || !state.live || !state.live.state) return "";
-    const device = deviceBy(state.route.mac);
-    const online = !!(device && device.online && state.live.online);
-    const power = !!state.live.state.on;
-    const bri = Number(state.live.state.bri || 0);
-    const disabled = online ? "" : " disabled";
-    return '<div class="dock">' +
-      '<div class="readout"><span>Brightness</span><span id="bri-readout">' + Math.round(bri / 255 * 100) + "% · " + bri + "</span></div>" +
-      '<div class="slider"><button class="step" type="button" data-repeat data-action="bri-step" data-dir="-1" aria-label="Decrease brightness"' + disabled + ">−</button>" +
-      '<input id="bri-range" type="range" min="0" max="255" value="' + bri + '" aria-label="Brightness"' + disabled + ">" +
-      '<button class="step" type="button" data-repeat data-action="bri-step" data-dir="1" aria-label="Increase brightness"' + disabled + ">+</button></div>" +
-      '<button class="btn ' + (power ? "primary" : "ghost") + '" type="button" data-role="power" data-action="power" aria-pressed="' + power + '"' + disabled + ">" +
-      (power ? "Turn off" : "Turn on") + "</button></div>";
-  }
-
-  function tabbar() {
-    const tabs = [
-      ["control", "#/", "Control"],
-      ["devices", "#/devices", "Devices"],
-      ["firmware", "#/firmware", "Firmware"],
-      ["events", "#/events", "Activity"],
-      ["settings", "#/settings", "Settings"],
-    ];
-    return '<nav class="tabs" aria-label="Primary">' + tabs.map((tab) => {
-      const current = state.route.name === tab[0] || (tab[0] === "devices" && ["device", "backup", "diff"].includes(state.route.name));
-      return '<a href="' + tab[1] + '"' + (current ? ' aria-current="page"' : "") + ">" + icon(tab[0]) + esc(tab[2]) + "</a>";
-    }).join("") + "</nav>";
-  }
-
-  function actionBar() {
-    const count = Object.keys(state.selected).length;
-    return '<div class="actionbar" role="toolbar" aria-label="Selected controllers">' +
-      '<button type="button" data-action="bulk-backup">Backup ' + count + "</button>" +
-      '<button type="button" data-action="bulk-reboot">Reboot</button>' +
-      '<button type="button" data-action="bulk-firmware">Update</button>' +
-      '<button type="button" data-action="select-toggle">Cancel</button></div>';
-  }
-
-  function body() {
-    if (state.booting && !state.control && !state.devices.length) return '<p class="boot"></p>';
-    if (state.error) return '<p class="error">' + esc(state.error) + '</p><button class="btn" type="button" data-action="refresh">Try again</button>';
-    const views = {
-      control: viewControl,
-      devices: viewDevices,
-      device: viewDevice,
-      firmware: viewFirmware,
-      events: viewEvents,
-      settings: viewSettings,
-      backup: viewBackup,
-      diff: viewDiff,
+  function drawStrip(ctx, w, h, px, t, { desaturate = 0, radius = 0, falloff = true, normalize = false } = {}) {
+    const points = px.length / 3;
+    let max = 0;
+    for (let i = 0; i < px.length; i++) if (px[i] > max) max = px[i];
+    ctx.clearRect(0, 0, w, h);
+    if (max < 5 && !normalize) {
+      ctx.fillStyle = "#141416";
+      ctx.fillRect(0, 0, w, h);
+      return [20, 20, 22];
+    }
+    const lift = normalize && max > 0 ? 255 / max : 1;
+    const drift = t / 1000;
+    const color = (i) => {
+      let r = px[i * 3] * lift;
+      let g = px[i * 3 + 1] * lift;
+      let b = px[i * 3 + 2] * lift;
+      const n = 1 + 0.03 * Math.sin(drift * 0.7 + i * 0.9) * Math.sin(drift * 0.31 + i * 0.37);
+      r *= n; g *= n; b *= n;
+      if (desaturate) {
+        const y = 0.3 * r + 0.59 * g + 0.11 * b;
+        r += (y - r) * desaturate; g += (y - g) * desaturate; b += (y - b) * desaturate;
+      }
+      return [clamp(r, 0, 255) | 0, clamp(g, 0, 255) | 0, clamp(b, 0, 255) | 0];
     };
-    return (views[state.route.name] || viewDevices)();
-  }
-
-  function installBanner() {
-    if (!showInstall()) return "";
-    const ios = /iPad|iPhone|iPod/.test(navigator.userAgent);
-    const button = state.installEvent
-      ? '<button class="btn primary" type="button" data-action="install">Install</button>'
-      : "";
-    const hint = ios
-      ? "In Safari, tap Share, then Add to Home Screen. It opens full screen, like an app."
-      : "Add WLED Fleet to your home screen so the controls stay under your thumb.";
-    return '<section class="banner"><strong>Keep it on your phone</strong><p>' + hint + "</p>" + button +
-      '<button class="btn ghost" type="button" data-action="dismiss-install">Not now</button></section>';
-  }
-
-  function cssColor(rgb) {
-    const color = rgb && rgb.length >= 3 ? rgb : [0, 0, 0];
-    return "rgb(" + color.map((part) => Number(part) || 0).join(",") + ")";
-  }
-
-  const LOOKS = [
-    { name: "Warm", swatch: [255, 170, 70], look: { on: true, bri: 170, col: [[255, 170, 70], [90, 30, 0], [0, 0, 0]], fx: 0 } },
-    { name: "Night", swatch: [255, 110, 30], effect: "breathe", look: { on: true, bri: 28, col: [[255, 100, 24], [60, 10, 0], [0, 0, 0]], fx: 0, sx: 30 } },
-    { name: "Bright", swatch: [255, 255, 245], look: { on: true, bri: 255, col: [[255, 255, 245], [0, 0, 0], [0, 0, 0]], fx: 0 } },
-    { name: "Rainbow", swatch: [80, 140, 255], effect: "rainbow", look: { on: true, bri: 180, col: [[255, 40, 40], [40, 255, 80], [40, 80, 255]], fx: 0, sx: 140 } },
-  ];
-
-  function effectId(part) {
-    const names = (state.control && state.control.effects) || [];
-    const index = names.findIndex((name) => String(name).toLowerCase().indexOf(part) >= 0);
-    return index >= 0 ? index : 0;
-  }
-
-  function targetMacs() {
-    const devices = (state.control && state.control.devices) || [];
-    return devices.filter((device) => device.online && !state.skipped[device.mac]).map((device) => device.mac);
-  }
-
-  function groupIsOn() {
-    const macs = targetMacs();
-    const devices = ((state.control && state.control.devices) || []).filter((device) => macs.indexOf(device.mac) >= 0);
-    return devices.some((device) => device.on);
-  }
-
-  function viewControl() {
-    const data = state.control;
-    if (!data) return '<div class="groups"><span class="chip on">All</span></div><article class="strip"></article><article class="strip"></article>';
-    const groups = data.groups || [];
-    const selectedGroup = groups.find((group) => Number(state.groupId) === Number(group.id));
-    const chips = '<button type="button" class="chip' + (state.groupId == null ? " on" : "") + '" data-action="use-group" data-id="" aria-pressed="' + (state.groupId == null) + '">All</button>' +
-      groups.map((group) => '<button type="button" class="chip' + (Number(state.groupId) === group.id ? " on" : "") + '" data-action="use-group" data-id="' + group.id + '" aria-pressed="' + (Number(state.groupId) === group.id) + '">' + esc(group.name) + "</button>").join("") +
-      '<button type="button" class="chip add-group" data-action="new-group">+ Group</button>';
-    const groupEdit = selectedGroup
-      ? '<button type="button" class="scope-edit" data-action="edit-group">Edit group</button>'
-      : "";
-    const devices = data.devices || [];
-    const included = devices.filter((device) => device.online && !state.skipped[device.mac]).length;
-    const boards = devices.map((device) => stripCard(device)).join("");
-    return '<section class="scope"><div class="groups">' + chips + '</div>' + groupEdit +
-      '<p class="scope-summary">' + included + " of " + devices.length + " controllers included</p></section>" + legendHtml() +
-      (boards || '<section class="card"><h2>No boards in this group</h2><p class="meta">Edit the group to choose controllers.</p></section>');
-  }
-
-  function nameField(device, where) {
-    if (state.renaming === device.mac) {
-      return '<input class="rename-input" data-mac="' + esc(device.mac) + '" data-where="' + where + '" maxlength="32" value="' + esc(device.name) + '" aria-label="Controller name">';
+    let sr = 0, sg = 0, sb = 0, sw = 0;
+    if (points < 20) {
+      ctx.fillStyle = "#0e0e10";
+      ctx.fillRect(0, 0, w, h);
+      ctx.globalCompositeOperation = "lighter";
+      const step = w / points;
+      for (let i = 0; i < points; i++) {
+        const [r, g, b] = color(i);
+        const cx = (i + 0.5) * step;
+        const grad = ctx.createRadialGradient(cx, h / 2, 0, cx, h / 2, step * 0.95);
+        grad.addColorStop(0, `rgba(${r},${g},${b},1)`);
+        grad.addColorStop(0.55, `rgba(${r},${g},${b},0.55)`);
+        grad.addColorStop(1, `rgba(${r},${g},${b},0)`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(cx - step, 0, step * 2, h);
+        const weight = r + g + b;
+        sr += r * weight; sg += g * weight; sb += b * weight; sw += weight;
+      }
+      ctx.globalCompositeOperation = "source-over";
+    } else {
+      const grad = ctx.createLinearGradient(0, 0, w, 0);
+      for (let i = 0; i < points; i++) {
+        const [r, g, b] = color(i);
+        grad.addColorStop((i + 0.5) / points, `rgb(${r},${g},${b})`);
+        const weight = r + g + b;
+        sr += r * weight; sg += g * weight; sb += b * weight; sw += weight;
+      }
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
     }
-    return '<button type="button" class="namebtn" data-action="rename-start" data-mac="' + esc(device.mac) + '">' + esc(device.name) + "</button>";
+    if (falloff) {
+      const shade = ctx.createLinearGradient(0, 0, 0, h);
+      shade.addColorStop(0, "rgba(0,0,0,0.30)");
+      shade.addColorStop(0.45, "rgba(0,0,0,0)");
+      shade.addColorStop(0.6, "rgba(0,0,0,0)");
+      shade.addColorStop(1, "rgba(0,0,0,0.42)");
+      ctx.fillStyle = shade;
+      ctx.fillRect(0, 0, w, h);
+    }
+    if (!sw) return [255, 255, 255];
+    return [sr / sw, sg / sw, sb / sw];
   }
 
-  function stripCard(device) {
-    const skipped = state.skipped[device.mac] ? " skipped" : "";
-    const mark = state.applyMarks[device.mac];
-    const markHtml = mark && !mark.ok ? '<span class="pill bad">' + esc(mark.error) + "</span>" : "";
-    const included = device.online && !state.skipped[device.mac];
-    const status = device.online ? (included ? (device.on ? "On" : "Off") : "Left out") : "Offline";
-    return '<article class="strip' + skipped + (device.online ? "" : " off") + '" data-mac="' + esc(device.mac) + '">' +
-      '<div class="strip-head"><button type="button" class="include" data-action="pick-board" data-mac="' + esc(device.mac) + '" aria-pressed="' + included + '" aria-label="' + (device.online ? (included ? "Exclude " : "Include ") + esc(device.name) : esc(device.name) + " is offline") + '"' + (device.online ? "" : " disabled") + '>' + (device.online ? (included ? "✓" : "+") : "—") + "</button>" +
-      '<span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' + status + "</span>" +
-      nameField(device, "control") + markHtml +
-      '<button type="button" class="flash" data-action="flash" data-mac="' + esc(device.mac) + '"' + (device.online ? "" : " disabled") + ' aria-label="Flash ' + esc(device.name) + '">Flash</button></div>' +
-      '<canvas data-preview="device" data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + ' lights"></canvas>' +
-      '<p class="meta" data-meta="' + compact(device.mac) + '">' + esc(device.effect || "") + "</p></article>";
+  function glowColor(rgb) {
+    const max = Math.max(rgb[0], rgb[1], rgb[2], 1);
+    const f = 255 / max;
+    return `rgb(${(rgb[0] * f) | 0},${(rgb[1] * f) | 0},${(rgb[2] * f) | 0})`;
   }
 
-  function legendHtml() {
-    const sections = state.sections;
-    if (!sections) return "";
-    if (sections.pending) return '<section class="legend"><strong>Identifying LED sections…</strong><p class="meta">Placing a marker every ' + Number(sections.every) + " LEDs.</p></section>";
-    const devices = (sections.devices || []).map((device) => {
-      const rows = (device.outputs || []).map((output) => {
-        const pin = output.pin == null ? "" : " · pin " + output.pin;
-        return '<li><i style="background:' + cssColor(output.color) + '"></i><span>Output ' + output.output + pin + " · " + output.leds + " LEDs</span></li>";
-      }).join("");
-      return '<div class="legend-device"><strong>' + esc(device.name) + "</strong><ul>" + rows + "</ul></div>";
-    }).join("");
-    return '<section class="legend"><div class="legend-head"><div><strong>Sections active</strong><p class="meta">Every ' + Number(sections.every) + " LEDs · restores automatically</p></div>" +
-      '<button type="button" class="btn tiny" data-action="sections-done">Restore now</button></div>' + devices + "</section>";
+  function frameLoop() {
+    const t = now();
+    const staleCache = S.frozenFrames && Date.now() - S.cachedAt > 10 * 60 * 1000;
+    for (const id of visible) {
+      const light = S.lights.get(id);
+      const entry = ribbonEls.get(id);
+      if (!light || !entry || entry.root.classList.contains("lifted-src")) continue;
+      const [w, h] = sizeCanvas(entry, entry.canvas);
+      const px = pixelsFor(light, t);
+      const desat = !light.online || staleCache || (!S.connected && S.everConnected) ? 0.6 : 0;
+      const dominant = drawStrip(entry.ctx, w, h, px, t, { desaturate: desat });
+      if (!entry.glowAt || t - entry.glowAt > 300) {
+        entry.glowAt = t;
+        entry.root.style.setProperty("--glow", glowColor(dominant));
+      }
+    }
+    drawSheetCanvases(t);
+    drawFavorites(t);
+    if (S.screen && S.screen.kind === "find") drawFind(t);
+    requestAnimationFrame(frameLoop);
   }
 
-  function controlDock() {
-    const savedCount = ((state.control && state.control.scenes) || []).length;
-    const looks = LOOKS.map((look) =>
-      '<button type="button" class="look' + (state.lastLook === look.name ? " chose" : "") + '" data-action="quick-look" data-name="' + esc(look.name) + '"><i style="background:' + cssColor(look.swatch) + '"></i><span>' + esc(look.name) + "</span></button>"
-    ).join("");
-    const on = groupIsOn();
-    return '<div class="dock composer">' +
-      '<div class="dock-label"><span>Looks</span><button type="button" data-action="saved-looks">Saved' + (savedCount ? " · " + savedCount : "") + "</button></div>" +
-      '<div class="looks">' + looks + "</div>" +
-      '<div class="readout"><span>Brightness</span><span>' + Math.round(Number(state.look.bri) / 255 * 100) + "%</span></div>" +
-      '<div class="slider"><button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="-20" aria-label="Dimmer">−</button>' +
-      '<input id="look-range" type="range" min="0" max="255" value="' + state.look.bri + '" aria-label="Brightness">' +
-      '<button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="20" aria-label="Brighter">+</button></div>' +
-      '<button class="btn ' + (on ? "primary" : "ghost") + '" type="button" data-action="group-power">' + (on ? "Turn off" : "Turn on") + "</button>" +
-      '<div class="grid2"><button class="btn tiny ghost" type="button" data-action="customize">Customize</button>' +
-      '<button class="btn tiny ghost" type="button" data-action="tools">Tools</button></div>' +
-      (state.undo ? '<button class="btn ghost" type="button" data-action="undo">Undo</button>' : "") +
-      "</div>";
+  function drawMiniLight(canvas, light, t, normalize) {
+    const ctx = canvas._ctx || (canvas._ctx = canvas.getContext("2d"));
+    const [w, h] = sizeCanvas(null, canvas);
+    drawStrip(ctx, w, h, pixelsFor(light, t), t, { falloff: false, normalize });
   }
 
-  function paintLeds() {
-    drawPreviews(performance.now());
+  const swatchCanvases = new Map();
+  function swatchCanvas(w, h) {
+    const key = `${w}x${h}`;
+    if (!swatchCanvases.has(key)) {
+      const canvas = document.createElement("canvas");
+      canvas.width = w;
+      canvas.height = h;
+      swatchCanvases.set(key, { canvas, ctx: canvas.getContext("2d") });
+    }
+    return swatchCanvases.get(key);
   }
 
-  const morphs = {};
-
-  function effectKind(name) {
-    const text = String(name || "").toLowerCase();
-    if (text.includes("rainbow") || text.includes("pride") || text.includes("colorloop")) return "rainbow";
-    if (text.includes("breath") || text.includes("breathe") || text.includes("fade")) return "breathe";
-    if (text.includes("chase") || text.includes("scanner") || text.includes("wipe") || text.includes("running") || text.includes("comet")) return "chase";
-    if (text.includes("spark") || text.includes("twinkle") || text.includes("firework")) return "sparkle";
-    if (text.includes("fire") || text.includes("candle") || text.includes("flame")) return "fire";
-    if (text.includes("blink") || text.includes("strobe") || text.includes("flash")) return "blink";
-    if (text.includes("theater") || text.includes("saw")) return "theater";
-    if (text.includes("solid") || text === "") return "solid";
-    return "flow";
+  // A swatch is a small field of the Look's light: a few rows of the effect, each a
+  // moment apart, blended so it reads as glow rather than as a striped chart.
+  function drawLookSwatch(canvas, look, t, { points = 24, square = true } = {}) {
+    if (!canvas.isConnected) return;
+    const ctx = canvas._ctx || (canvas._ctx = canvas.getContext("2d"));
+    const [w, h] = sizeCanvas(null, canvas);
+    const px = buffer(`s${points}`, points * 3);
+    if (!square) {
+      Fx.render(look, points, t / 1000, px);
+      drawStrip(ctx, w, h, px, t, { falloff: false, normalize: true });
+      return;
+    }
+    // Render a tiny rows x points image and let the browser's smoothing scale it up into glow.
+    const rows = 6;
+    const tiny = swatchCanvas(points, rows);
+    const image = tiny.ctx.createImageData(points, rows);
+    for (let r = 0; r < rows; r++) {
+      Fx.render(look, points, t / 1000 + r * 0.29, px);
+      let max = 1;
+      for (let i = 0; i < px.length; i++) if (px[i] > max) max = px[i];
+      const lift = Math.min(3, 235 / max) * (0.78 + 0.22 * Math.sin((r / (rows - 1)) * Math.PI));
+      for (let i = 0; i < points; i++) {
+        const o = (r * points + ((i + (r % 2) * 3) % points)) * 4;
+        image.data[o] = Math.min(255, px[i * 3] * lift);
+        image.data[o + 1] = Math.min(255, px[i * 3 + 1] * lift);
+        image.data[o + 2] = Math.min(255, px[i * 3 + 2] * lift);
+        image.data[o + 3] = 255;
+      }
+    }
+    tiny.ctx.putImageData(image, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(tiny.canvas, 0, 0, w, h);
+    ctx.globalAlpha = 1;
+    const vignette = ctx.createRadialGradient(w / 2, h / 2, w * 0.25, w / 2, h / 2, w * 0.78);
+    vignette.addColorStop(0, "rgba(0,0,0,0)");
+    vignette.addColorStop(1, "rgba(0,0,0,0.5)");
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, w, h);
   }
 
-  function mix(a, b, t) {
-    return [
-      Math.round(a[0] + (b[0] - a[0]) * t),
-      Math.round(a[1] + (b[1] - a[1]) * t),
-      Math.round(a[2] + (b[2] - a[2]) * t),
-    ];
+  function drawFavorites(t) {
+    for (const canvas of document.querySelectorAll(".fav canvas")) {
+      if (canvas._off || !canvas._look) {
+        if (canvas._drawnOff) continue;
+        const ctx = canvas.getContext("2d");
+        const w = canvas.width;
+        ctx.clearRect(0, 0, w, w);
+        ctx.fillStyle = "#141416";
+        ctx.beginPath();
+        ctx.arc(w / 2, w / 2, w / 2 - 1, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = "rgba(232,232,234,0.35)";
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(w / 2, w / 2, w / 4, -Math.PI * 0.3, Math.PI * 1.3);
+        ctx.stroke();
+        ctx.beginPath();
+        ctx.moveTo(w / 2, w / 2 - w / 3.2);
+        ctx.lineTo(w / 2, w / 2 - w / 12);
+        ctx.stroke();
+        canvas._drawnOff = true;
+        continue;
+      }
+      drawLookSwatch(canvas, canvas._look, t, { points: 12 });
+    }
   }
 
-  function noteMorph(mac, color) {
-    const previous = morphs[mac] && morphs[mac].current ? morphs[mac].current : color;
-    morphs[mac] = { from: previous, to: color, t0: performance.now(), current: previous };
+  // ----- gestures ----------------------------------------------------------
+
+  function bindPress(node, { tap, long, double }) {
+    let timer = 0;
+    let start = null;
+    let fired = false;
+    let lastTap = 0;
+    let tapTimer = 0;
+    node.addEventListener("pointerdown", (event) => {
+      if (event.button) return;
+      start = { x: event.clientX, y: event.clientY };
+      fired = false;
+      clearTimeout(timer);
+      if (long) timer = setTimeout(() => { fired = true; haptic("light"); long(event); }, 480);
+    });
+    node.addEventListener("pointermove", (event) => {
+      if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) clearTimeout(timer);
+    });
+    const end = (event) => {
+      clearTimeout(timer);
+      if (!start || fired || event.type !== "pointerup") { start = null; return; }
+      if (Math.hypot(event.clientX - start.x, event.clientY - start.y) > 8) { start = null; return; }
+      start = null;
+      if (double) {
+        const t = Date.now();
+        if (t - lastTap < 260) { clearTimeout(tapTimer); lastTap = 0; double(event); return; }
+        lastTap = t;
+        tapTimer = setTimeout(() => tap && tap(event), 230);
+      } else if (tap) tap(event);
+    };
+    node.addEventListener("pointerup", end);
+    node.addEventListener("pointercancel", end);
+    node.addEventListener("contextmenu", (event) => event.preventDefault());
   }
 
-  function morphed(mac, color, now) {
-    const item = morphs[mac];
-    if (!item) return color;
-    const t = Math.min(1, (now - item.t0) / 420);
-    const next = mix(item.from, item.to, t);
-    item.current = next;
-    return next;
-  }
+  function bindRibbon(entry, id) {
+    const root = entry.root;
+    let g = null;
 
-  function previewSpec(canvas, now) {
-    if (canvas.dataset.preview === "effect") {
-      const names = (state.control && state.control.effects) || [];
-      return {
-        kind: effectKind(names[Number(canvas.dataset.fx || 0)] || ""),
-        colors: [[255, 64, 48], [40, 220, 120], [70, 120, 255]],
-        on: true,
-        bri: 255,
-        speed: 170,
-        live: null,
+    root.addEventListener("pointerdown", (event) => {
+      if (event.button || entry.editing) return;
+      const light = S.lights.get(id);
+      if (!light) return;
+      g = {
+        x: event.clientX,
+        y: event.clientY,
+        t: Date.now(),
+        mode: null,
+        startBri: light.on ? light.bri : 0,
+        width: root.getBoundingClientRect().width,
+        onName: event.target === entry.name,
+        pointer: event.pointerId,
+        lastSent: 0,
+        long: false,
       };
-    }
-    const device = ((state.control && state.control.devices) || []).find((item) => compact(item.mac) === canvas.dataset.mac);
-    if (!device) return null;
-    return {
-      kind: effectKind(device.effect),
-      colors: [
-        morphed(device.mac, (device.col && device.col[0]) || [255, 160, 60], now),
-        (device.col && device.col[1]) || [20, 20, 28],
-        (device.col && device.col[2]) || [0, 0, 0],
-      ],
-      on: !!(device.online && device.on),
-      bri: Number(device.bri || 0),
-      speed: Number(device.sx || 128),
-      live: device.leds && device.leds.length ? device.leds : null,
-    };
-  }
+      g.timer = setTimeout(() => {
+        if (!g || g.mode) return;
+        g.long = true;
+        if (g.onName) {
+          g.mode = "done";
+          startRename(entry, id);
+          return;
+        }
+        haptic("light");
+        toggleMulti(id);
+        g.mode = "long";
+      }, 480);
+    });
 
-  function hsl(h, s, l) {
-    const a = s * Math.min(l, 1 - l);
-    const f = (n) => {
-      const k = (n + h * 12) % 12;
-      return l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
-    };
-    return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
-  }
-
-  function pixelAt(spec, index, count, now) {
-    const primary = spec.colors[0] || [255, 160, 60];
-    const secondary = spec.colors[1] || [0, 0, 0];
-    const level = spec.on ? spec.bri / 255 : 0;
-    const speed = 0.35 + spec.speed / 180;
-    const phase = index / count;
-    const clock = now / 1000 * speed;
-    let rgb = primary;
-    if (!spec.on) rgb = [18, 20, 18];
-    else if (spec.kind === "breathe") rgb = primary.map((channel) => Math.round(channel * (0.35 + 0.65 * (0.5 + 0.5 * Math.sin(clock * 3)))));
-    else if (spec.kind === "blink") rgb = primary.map((channel) => Math.round(channel * (Math.sin(clock * 8) > 0 ? 1 : 0.12)));
-    else if (spec.kind === "rainbow") rgb = hsl((phase + clock * 0.25) % 1, 0.85, 0.55);
-    else if (spec.kind === "chase") {
-      const head = (clock * 0.45) % 1;
-      const dist = Math.min(Math.abs(phase - head), 1 - Math.abs(phase - head));
-      rgb = mix(secondary, primary, Math.max(0, 1 - dist * 7));
-    } else if (spec.kind === "theater") rgb = (index + Math.floor(clock * 6)) % 3 === 0 ? primary : secondary;
-    else if (spec.kind === "sparkle") {
-      const spark = Math.sin(index * 12.9898 + Math.floor(clock * 8) * 78.233) * 43758.5453;
-      const frac = spark - Math.floor(spark);
-      rgb = frac > 0.82 ? [255, 255, 240] : primary.map((channel) => Math.round(channel * 0.25));
-    } else if (spec.kind === "fire") {
-      const flicker = 0.45 + 0.55 * Math.abs(Math.sin(clock * 9 + index * 0.7));
-      rgb = [Math.round(255 * flicker), Math.round(90 * flicker * (0.4 + phase)), Math.round(10 * flicker)];
-    } else if (spec.kind === "flow") {
-      rgb = mix(primary, secondary, 0.5 + 0.5 * Math.sin(((phase + clock * 0.3) % 1) * Math.PI * 2));
-    }
-    if (spec.live && spec.live.length && spec.kind !== "rainbow" && spec.kind !== "fire") {
-      const shift = spec.kind === "solid" ? 0 : Math.floor(clock * 6);
-      const sample = spec.live[Math.abs((index + shift) % spec.live.length)];
-      if (sample && spec.kind === "solid") return sample.map((channel) => Math.max(0, Math.min(255, Math.round(channel))));
-      if (sample) rgb = mix(rgb, sample, 0.55);
-    }
-    const scale = spec.on ? level : 1;
-    return rgb.map((channel) => Math.max(0, Math.min(255, Math.round(channel * scale))));
-  }
-
-  function drawPreviews(now) {
-    document.querySelectorAll("canvas[data-preview]").forEach((canvas) => {
-      if (canvas.closest("[hidden]")) return;
-      const spec = previewSpec(canvas, now);
-      if (!spec) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const width = canvas.clientWidth || 120;
-      const height = canvas.clientHeight || 28;
-      const nextW = Math.floor(width * dpr);
-      const nextH = Math.floor(height * dpr);
-      if (canvas.width !== nextW || canvas.height !== nextH) {
-        canvas.width = nextW;
-        canvas.height = nextH;
+    root.addEventListener("pointermove", (event) => {
+      if (!g || g.pointer !== event.pointerId) return;
+      const dx = event.clientX - g.x;
+      const dy = event.clientY - g.y;
+      if (!g.mode) {
+        if (Math.abs(dx) > 12 && Math.abs(dy) < 6) {
+          g.mode = "bri";
+          clearTimeout(g.timer);
+          root.setPointerCapture(event.pointerId);
+          root.classList.add("dragging-bri");
+        } else if (Math.abs(dy) > 8 || Math.abs(dx) > 24) {
+          clearTimeout(g.timer);
+          g.mode = "scroll";
+        }
+      } else if (g.mode === "long" && Math.abs(dy) > 10) {
+        // Long-press then move: this is a reorder, not a selection.
+        toggleMulti(id);
+        g.mode = "drag";
+        root.setPointerCapture(event.pointerId);
+        startReorder(entry, id, event);
       }
-      const context = canvas.getContext("2d");
-      if (!context) return;
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const count = Math.max(8, Math.round(width / 8));
-      const gap = 2;
-      const led = Math.max(3, (width - gap * (count - 1)) / count);
-      const y = Math.max(2, (height - 16) / 2);
-      for (let index = 0; index < count; index += 1) {
-        context.fillStyle = cssColor(pixelAt(spec, index, count, now));
-        context.beginPath();
-        context.roundRect(index * (led + gap), y, led, Math.min(16, height - 4), 3);
-        context.fill();
-      }
+      if (g.mode === "bri") briDrag(id, entry, g, dx);
+      if (g.mode === "drag") moveReorder(event);
     });
-  }
 
-  function visuals(now) {
-    if (!document.hidden) drawPreviews(now);
-    requestAnimationFrame(visuals);
-  }
-
-  function updateStripMeta() {
-    if (!state.control) return;
-    state.control.devices.forEach((device) => {
-      const node = document.querySelector('[data-meta="' + compact(device.mac) + '"]');
-      if (!node) return;
-      node.textContent = device.effect || "";
-    });
-  }
-
-  async function refreshControl(forceRender) {
-    if (state.route.name !== "control") return;
-    const requestId = ++controlGeneration;
-    const groupId = state.groupId;
-    try {
-      const query = groupId ? "?group=" + groupId : "";
-      const data = await api("/api/control" + query);
-      if (requestId !== controlGeneration || state.route.name !== "control" || state.groupId !== groupId) return;
-      const previous = state.control && state.control.devices ? state.control.devices.map((device) => device.mac).join() : "";
-      const next = data.devices.map((device) => device.mac).join();
-      applyFlashOverlay(data);
-      state.control = data;
-      state.error = "";
-      persistUi();
-      if (forceRender || previous !== next || !document.querySelector(".strip")) {
-        if (canRepaint()) render();
-      } else {
-        paintLeds();
-        updateStripMeta();
-      }
-    } catch (error) {
-      if (requestId !== controlGeneration || state.route.name !== "control" || state.groupId !== groupId) return;
-      if (error.message !== "Sign in required" && !state.control) state.error = error.message;
-    }
-  }
-
-  function applyFlashOverlay(data) {
-    const now = Date.now();
-    (data.devices || []).forEach((device) => {
-      if ((state.flashUntil[device.mac] || 0) <= now) return;
-      device.on = true;
-      const count = Math.max(12, (device.leds || []).length || 16);
-      device.leds = Array.from({ length: count }, () => [255, 255, 255]);
-      device.effect = "Flash";
-    });
-  }
-
-  function copyBoards(macs) {
-    return macs.map((mac) => {
-      const device = ((state.control && state.control.devices) || []).find((item) => item.mac === mac);
-      return device ? JSON.parse(JSON.stringify(device)) : null;
-    }).filter(Boolean);
-  }
-
-  function restoreBoards(copies) {
-    if (!state.control) return;
-    copies.forEach((copy) => {
-      const device = state.control.devices.find((item) => item.mac === copy.mac);
-      if (device) Object.assign(device, copy);
-    });
-    paintLeds();
-    updateStripMeta();
-  }
-
-  function pulseTiles(macs, rgb) {
-    macs.forEach((mac) => {
-      const node = document.querySelector('.strip[data-mac="' + mac + '"]');
-      if (!node) return;
-      node.style.setProperty("--tile-glow", cssColor(rgb));
-      node.classList.remove("glow");
-      void node.offsetWidth;
-      node.classList.add("glow");
-    });
-  }
-
-  function setName(mac, name) {
-    state.devices.forEach((device) => { if (device.mac === mac) device.name = name; });
-    if (state.control) state.control.devices.forEach((device) => { if (device.mac === mac) device.name = name; });
-  }
-
-  let renameLock = false;
-  async function commitRename(mac, raw, cancelled) {
-    if (renameLock) return;
-    renameLock = true;
-    try {
-      const current = ((state.control && state.control.devices) || []).find((item) => item.mac === mac) || deviceBy(mac);
-      const previous = current ? current.name : "";
-      state.renaming = "";
-      if (cancelled || !String(raw || "").trim() || String(raw).trim() === previous) {
-        if (canRepaint()) render();
+    const finish = (event) => {
+      if (!g || g.pointer !== event.pointerId) return;
+      clearTimeout(g.timer);
+      const dx = event.clientX - g.x;
+      const elapsed = Date.now() - g.t;
+      const mode = g.mode;
+      const state = g;
+      g = null;
+      if (mode === "bri") {
+        root.classList.remove("dragging-bri");
+        if (event.type === "pointerup" && elapsed < 260 && dx > 28 && state.startBri >= 0) {
+          // A quick right flick is a power toggle, not a brightness change.
+          revertBri(id, state);
+          powerSwipe(entry, id);
+          return;
+        }
+        endBri(id, state);
         return;
       }
-      const name = String(raw).trim();
-      setName(mac, name);
-      if (canRepaint()) render();
-      try {
-        const saved = await api("/api/devices/" + compact(mac) + "/rename", { method: "POST", body: JSON.stringify({ name }) });
-        setName(mac, (saved && saved.name) || name);
-        persistUi();
-      } catch (error) {
-        setName(mac, previous);
-        render();
-        if (error.message !== "Sign in required") toast(error.message || "Rename failed");
-      }
-    } finally {
-      renameLock = false;
-    }
-  }
-
-  function rememberUndo() {
-    if (state.holdingUndo) return;
-    const macs = targetMacs();
-    state.undo = macs.map((mac) => {
-      const device = ((state.control && state.control.devices) || []).find((item) => item.mac === mac);
-      if (!device) return null;
-      return {
-        mac,
-        look: { on: device.on, bri: device.bri, col: device.col, fx: device.fx, pal: device.pal, sx: device.sx, ix: device.ix },
-      };
-    }).filter(Boolean);
-  }
-
-  function paintOptimistic(macs, look) {
-    if (!state.control) return;
-    macs.forEach((mac) => {
-      const device = state.control.devices.find((item) => item.mac === mac);
-      if (!device) return;
-      if (look.on != null) device.on = look.on;
-      if (look.bri != null) device.bri = look.bri;
-      if (look.fx != null) {
-        device.fx = look.fx;
-        if (state.control.effects && state.control.effects[look.fx]) device.effect = state.control.effects[look.fx];
-      }
-      if (look.col && look.col[0]) {
-        noteMorph(device.mac, look.col[0]);
-        device.col = look.col;
-        const level = device.on ? Number(device.bri || 0) / 255 : 0;
-        const color = look.col[0].map((channel) => Math.round(channel * level));
-        const count = Math.max(12, (device.leds || []).length || 16);
-        device.leds = Array.from({ length: count }, () => color);
-      }
-      if (look.on === false) device.leds = (device.leds || [0]).map(() => [0, 0, 0]);
-    });
-    paintLeds();
-    updateStripMeta();
-  }
-
-  function applyLookToComposer(look) {
-    if (!look || typeof look !== "object") return false;
-    ["on", "bri", "fx", "pal", "sx", "ix"].forEach((key) => {
-      if (look[key] != null) state.look[key] = key === "on" ? Boolean(look[key]) : Number(look[key]);
-    });
-    if (Array.isArray(look.col)) state.look.col = look.col.map((color) => color.slice());
-    state.lookCurrent = true;
-    return true;
-  }
-
-  function lookFromWledState(raw) {
-    if (!raw || typeof raw !== "object") return null;
-    const segment = Array.isArray(raw.seg) && raw.seg.length ? raw.seg[0] : {};
-    return {
-      on: raw.on,
-      bri: raw.bri,
-      col: segment.col,
-      fx: segment.fx,
-      pal: segment.pal,
-      sx: segment.sx,
-      ix: segment.ix,
+      if (mode === "drag") { endReorder(event); return; }
+      if (mode || event.type !== "pointerup") return;
+      if (Math.hypot(dx, event.clientY - state.y) > 10) return;
+      ribbonTap(id);
     };
+    root.addEventListener("pointerup", finish);
+    root.addEventListener("pointercancel", finish);
+    root.addEventListener("contextmenu", (event) => event.preventDefault());
+    // Once a gesture is ours, the page must not scroll under it.
+    root.addEventListener(
+      "touchmove",
+      (event) => { if (g && (g.mode === "bri" || g.mode === "drag" || g.mode === "long")) event.preventDefault(); },
+      { passive: false },
+    );
   }
 
-  function currentLook() {
-    return {
-      on: Boolean(state.look.on),
-      bri: Number(state.look.bri),
-      col: state.look.col.map((color) => color.slice()),
-      fx: Number(state.look.fx),
-      pal: Number(state.look.pal),
-      sx: Number(state.look.sx),
-      ix: Number(state.look.ix),
-    };
-  }
-
-  function withFade(look) {
-    if (!look || look.tt != null || look.ps != null) return look;
-    const faded = Object.assign({}, look);
-    const onlyBrightness = look.bri != null && look.col == null && look.fx == null && look.pal == null && look.on == null;
-    faded.tt = onlyBrightness ? 3 : 8;
-    return faded;
-  }
-
-  async function pushLook(action, id, lookOverride) {
-    const macs = targetMacs();
-    if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
-    const before = copyBoards(macs);
-    if (action === "play-scene") {
-      const scene = ((state.control && state.control.scenes) || []).find((item) => Number(item.id) === Number(id));
-      rememberUndo();
-      try {
-        const results = await api("/api/scenes/" + id + "/apply", { method: "POST", body: JSON.stringify({ macs, sync: false }) });
-        const applied = (results.results || []).some((row) => row.ok);
-        if (scene && applied) applyLookToComposer(scene.look);
-        noteResults(results);
-      } catch (error) {
-        restoreBoards(before);
-        throw error;
-      }
+  let tapState = { id: null, at: 0, timer: 0 };
+  function ribbonTap(id) {
+    const t = Date.now();
+    if (tapState.id === id && t - tapState.at < 260) {
+      clearTimeout(tapState.timer);
+      tapState = { id: null, at: 0, timer: 0 };
+      identify(id);
       return;
     }
-    const look = withFade(action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) }));
-    if (action === "direct" && lookOverride) applyLookToComposer(lookOverride);
-    if (action === "apply-preset") state.lookCurrent = false;
-    rememberUndo();
-    paintOptimistic(macs, look);
-    const glow = look.col && look.col[0] ? look.col[0] : [255, 200, 80];
-    pulseTiles(macs, look.on === false ? [40, 40, 40] : glow);
-    try {
-      const results = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs, look, sync: false }) });
-      const failed = (results.results || []).filter((row) => !row.ok).map((row) => row.mac);
-      if (failed.length) restoreBoards(before.filter((copy) => failed.indexOf(copy.mac) >= 0));
-      if (action === "apply-preset") {
-        const first = (results.results || []).find((row) => row.ok);
-        if (first) {
-          try {
-            const live = await api("/api/devices/" + compact(first.mac) + "/live");
-            if (live && live.state) applyLookToComposer(lookFromWledState(live.state));
-          } catch (_) {
-            state.lookCurrent = false;
+    clearTimeout(tapState.timer);
+    tapState = {
+      id,
+      at: t,
+      timer: setTimeout(() => {
+        tapState = { id: null, at: 0, timer: 0 };
+        if (S.multi) toggleMulti(id);
+        else selectSet([id], true);
+      }, 230),
+    };
+  }
+
+  function identify(id) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    haptic("light");
+    api(`/api/lights/${id}/identify`, { method: "POST" }).catch((error) => toast(error.message));
+    const entry = ribbonEls.get(id);
+    if (!entry) return;
+    // Mirror the three white flashes on the ribbon so you know which one you hit.
+    const t0 = now();
+    predictions.set(id, {
+      look: { fx: "Solid", col: [[255, 255, 255], [0, 0, 0], [0, 0, 0]] },
+      bri: 255,
+      from: null,
+      t0,
+      dur: 0,
+      until: t0 + 1200,
+      kind: "flash",
+      dir: 1,
+    });
+    let step = 0;
+    const tick = () => {
+      step += 1;
+      const p = predictions.get(id);
+      if (!p || p.kind !== "flash") return;
+      p.bri = step % 2 ? 0 : 255;
+      if (step < 6) setTimeout(tick, 200);
+      else predictions.delete(id);
+    };
+    setTimeout(tick, 200);
+  }
+
+  function briDrag(id, entry, g, dx) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    const target = Math.round(clamp(g.startBri + (dx / g.width) * 255 * 1.25, 0, 255));
+    const wasOn = light.on;
+    if (target <= 0) {
+      if (wasOn) haptic("strong");
+      light.on = false;
+    } else {
+      if (!wasOn || (target === 255 && light.bri !== 255)) haptic("medium");
+      light.on = true;
+      light.bri = target;
+    }
+    entry.pct.textContent = `${pct(target)}%`;
+    entry.root.classList.toggle("off", !light.on);
+    pushBri(id, light.on ? light.bri : 0);
+    if (!g.undo) g.undo = { light: id, on: g.startBri > 0, bri: g.startBri > 0 ? g.startBri : light.bri };
+    const t = Date.now();
+    if (t - g.lastSent >= 100) {
+      g.lastSent = t;
+      send({ t: "apply", seq: ++S.seq, preview: true, tt: 0, changes: [light.on ? { light: id, bri: target, on: true } : { light: id, on: false }] });
+    }
+    refreshChrome();
+  }
+
+  function endBri(id, g) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    const change = light.on ? { light: id, bri: light.bri, on: true } : { light: id, on: false };
+    commit([change], {
+      label: light.on ? `${light.name} → ${pct(light.bri)}%` : `${light.name} off`,
+      kind: "bri",
+      undo: g.undo ? [g.undo] : null,
+      tt: 0,
+    });
+  }
+
+  function revertBri(id, g) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    light.on = g.startBri > 0;
+    if (g.startBri > 0) light.bri = g.startBri;
+    pushBri(id, light.on ? light.bri : 0);
+    refreshRibbon(id);
+  }
+
+  function powerSwipe(entry, id) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    entry.root.classList.add("power-swipe");
+    setTimeout(() => entry.root.classList.remove("power-swipe"), 180);
+    haptic("medium");
+    commit([{ light: id, on: !light.on }], { label: `${light.name} ${light.on ? "off" : "on"}`, kind: "power" });
+  }
+
+  function startRename(entry, id) {
+    const light = S.lights.get(id);
+    if (!light) return;
+    haptic("light");
+    entry.editing = true;
+    const input = el("input", { value: light.name, maxlength: 40, enterkeyhint: "done", "aria-label": "Light name" });
+    entry.name.replaceChildren(input);
+    input.focus();
+    input.select();
+    const done = (save) => {
+      if (!entry.editing) return;
+      entry.editing = false;
+      const value = input.value.trim();
+      entry.name.textContent = save && value ? value : light.name;
+      if (save && value && value !== light.name) {
+        light.name = value;
+        api(`/api/lights/${id}`, { method: "PATCH", body: { name: value } }).catch((error) => toast(error.message));
+      }
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); input.blur(); }
+      if (event.key === "Escape") done(false);
+    });
+    input.addEventListener("blur", () => done(true));
+    input.addEventListener("pointerdown", (event) => event.stopPropagation());
+  }
+
+  // Reorder and drag-to-merge -------------------------------------------------
+
+  let drag = null;
+
+  function startReorder(entry, id, event) {
+    const rect = entry.root.getBoundingClientRect();
+    const placeholder = el("div", { class: "placeholder" });
+    entry.root.after(placeholder);
+    entry.root.classList.add("lifted");
+    entry.root.style.left = `${rect.left}px`;
+    entry.root.style.width = `${rect.width}px`;
+    entry.root.style.top = `${rect.top}px`;
+    document.body.append(entry.root);
+    haptic("medium");
+    drag = { id, entry, placeholder, offset: event.clientY - rect.top, merge: null, mergeTimer: 0, hover: null };
+  }
+
+  function moveReorder(event) {
+    if (!drag) return;
+    const top = event.clientY - drag.offset;
+    drag.entry.root.style.top = `${top}px`;
+    const home = $("#home");
+    const homeRect = home.getBoundingClientRect();
+    if (event.clientY < homeRect.top + 60) home.scrollTop -= 8;
+    if (event.clientY > homeRect.bottom - 80) home.scrollTop += 8;
+    const rows = [...document.querySelectorAll("#zones .ribbon")];
+    const centerY = event.clientY;
+    let hover = null;
+    for (const row of rows) {
+      const rect = row.getBoundingClientRect();
+      if (centerY >= rect.top && centerY <= rect.bottom) {
+        const local = (centerY - rect.top) / rect.height;
+        hover = { row, middle: local > 0.25 && local < 0.75, before: local < 0.5 };
+        break;
+      }
+    }
+    if (hover && hover.middle) {
+      if (!drag.hover || drag.hover.row !== hover.row) {
+        clearTimeout(drag.mergeTimer);
+        if (drag.merge) drag.merge.classList.remove("merge-target");
+        drag.merge = null;
+        drag.mergeTimer = setTimeout(() => {
+          drag.merge = hover.row;
+          hover.row.classList.add("merge-target");
+          haptic("light");
+        }, 380);
+      }
+    } else {
+      clearTimeout(drag.mergeTimer);
+      if (drag.merge) drag.merge.classList.remove("merge-target");
+      drag.merge = null;
+      if (hover) {
+        if (hover.before) hover.row.before(drag.placeholder);
+        else hover.row.after(drag.placeholder);
+      } else {
+        // Over a zone header or gap: drop at the end of the nearest section.
+        const sections = [...document.querySelectorAll("#zones .zone")];
+        for (const section of sections) {
+          const rect = section.getBoundingClientRect();
+          if (centerY >= rect.top && centerY <= rect.bottom) {
+            const rowsEl = section.querySelector(".rows");
+            if (centerY < rect.top + 36) rowsEl.prepend(drag.placeholder);
+            break;
           }
         }
       }
-      noteResults(results);
-    } catch (error) {
-      restoreBoards(before);
-      throw error;
     }
+    drag.hover = hover;
   }
 
-  function noteResults(results) {
-    state.applyMarks = {};
-    (results.results || []).forEach((row) => { state.applyMarks[row.mac] = row; });
-    const failed = (results.results || []).filter((row) => !row.ok);
-    if (failed.length) toast(failed[0].name + " did not change");
-    refreshControl(true);
-  }
-
-  let brightnessTimer = 0;
-  function queueBrightness() {
-    clearTimeout(brightnessTimer);
-    brightnessTimer = setTimeout(() => {
-      pushLook("direct", null, { on: true, bri: Number(state.look.bri) }).catch((error) => toast(error.message));
-    }, 180);
-  }
-
-  function nudgeLook(key, delta) {
-    const current = Number(state.look[key] || 0);
-    state.look[key] = Math.max(0, Math.min(255, current + delta));
-    if (key === "bri") {
-      const range = document.getElementById("look-range");
-      const readout = document.querySelector(".composer .readout span");
-      if (range) range.value = String(state.look.bri);
-      if (readout && !Object.keys(state.picked).length) readout.textContent = "Tap boards or a group";
+  function endReorder() {
+    if (!drag) return;
+    const { entry, placeholder, id, merge } = drag;
+    clearTimeout(drag.mergeTimer);
+    drag = null;
+    entry.root.classList.remove("lifted");
+    entry.root.style.cssText = "";
+    placeholder.replaceWith(entry.root);
+    if (merge) {
+      merge.classList.remove("merge-target");
+      const targetId = Number(merge.dataset.id);
+      const target = S.lights.get(targetId);
+      const light = S.lights.get(id);
+      haptic("success");
+      if (target && target.zone_id) {
+        light.zone_id = target.zone_id;
+        saveLayout();
+      } else if (target && light) {
+        api("/api/zones", { method: "POST", body: { name: suggestZoneName(target, light), light_ids: [targetId, id] } }).catch((error) => toast(error.message));
+      }
+      return;
     }
-    const node = document.querySelector('[data-look-readout="' + key + '"]');
-    if (node) node.textContent = String(state.look[key]);
+    saveLayout();
   }
 
-  function viewDevices() {
-    const visible = state.devices.filter((item) => state.showForgotten || !item.forgotten);
-    const online = state.devices.filter((item) => item.online && !item.forgotten).length;
-    const scan = state.status && state.status.scan ? ago(state.status.scan.at) : "not yet";
-    const forgotten = state.devices.filter((item) => item.forgotten).length;
-    let list = "";
-    if (!visible.length) {
-      list = '<section class="card"><h2>No controllers yet</h2><p class="meta">WLED announces itself on the local network, and this app is listening. A new controller shows up on its own. If one is powered on but missing, add its subnet in Settings.</p>' +
-        '<button class="btn primary" type="button" data-action="refresh">Scan again</button></section>';
-    } else {
-      list = visible.map((device) => {
-        const href = "#/d/" + compact(device.mac);
-        const checked = state.selected[device.mac] ? "checked" : "";
-        const box = state.selecting
-          ? '<label class="check"><input type="checkbox" ' + checked + ' data-action="toggle-select" data-mac="' + esc(device.mac) + '"> Select</label>'
-          : "";
-        const facts = '<p class="meta">' + esc(device.arch || "unknown chip") + " · " + esc(device.version || "unknown") +
-          (device.led_count != null ? " · " + device.led_count + " LEDs" : "") + "</p>" +
-          '<p class="meta mono">' + esc(device.ip) + (device.port && device.port !== 80 ? ":" + device.port : "") + " · " + esc(device.mac) + "</p>" +
-          '<p class="meta">Backup ' + esc(ago(device.last_backup_at)) + (device.rssi != null ? " · " + device.rssi + " dBm" : "") + "</p>" +
-          (device.last_error ? '<p class="warn">' + esc(device.last_error) + "</p>" : "");
-        const open = state.selecting ? facts : '<a class="open" href="' + href + '">' + facts + "</a>";
-        return '<div class="device">' +
-          '<div class="status"><span class="dot ' + (device.online ? "on" : "off") + '"></span>' +
-          (device.activity ? esc(device.activity) : (device.online ? "Online" : "Offline")) +
-          (device.starred ? " · Marked" : "") + "</div>" +
-          nameField(device, "devices") +
-          open +
-          box + "</div>";
-      }).join("");
-    }
-    return '<div class="summary"><span>' + online + " online</span><span>Scanned " + esc(scan) + "</span></div>" +
-      '<button class="btn primary" type="button" data-action="backup-all">Back up all</button>' +
-      installBanner() + list +
-      (forgotten ? '<button class="btn ghost" type="button" data-action="forgotten-toggle">' +
-        (state.showForgotten ? "Hide forgotten" : "Forgotten (" + forgotten + ")") + "</button>" : "");
+  function suggestZoneName(a, b) {
+    const words = (name) => name.split(/\s+/);
+    const first = words(a.name)[0];
+    return first && words(b.name)[0] === first ? first : "New zone";
   }
 
-  function currentSegs(device) {
-    if (state.edits && state.edits.mac === compact(device.mac)) return state.edits;
-    const live = state.live || {};
-    return {
-      mac: compact(device.mac),
-      buses: (live.buses || []).map((bus) => ({ start: bus.start, len: bus.len, pin: bus.pin })),
-      segs: ((live.state && live.state.seg) || []).map((seg) => ({
-        id: seg.id || 0,
-        start: seg.start || 0,
-        stop: seg.stop || 0,
-        on: seg.on !== false,
-        rev: !!seg.rev,
-      })),
-    };
-  }
-
-  function viewDevice() {
-    const device = deviceBy(state.route.mac);
-    if (!device) return '<p class="error">That controller is not in the fleet.</p>';
-    const live = state.live;
-    if (!live) return '<p class="boot">Reading ' + esc(device.name) + "…</p>";
-    const online = live.online && device.online;
-    const edits = currentSegs(device);
-    const color = live.state && live.state.seg && live.state.seg[0] && live.state.seg[0].col ? live.state.seg[0].col[0] : [255, 170, 70];
-    const colorKey = color.join(",");
-    return (online ? "" : '<p class="error">' + esc(live.error || "This controller is not answering. Backups are still here.") + "</p>") +
-      '<p class="meta mono">' + esc(device.ip) + (device.port && device.port !== 80 ? ":" + device.port : "") + " · " + esc(device.mac) + "<br>" +
-      esc(device.arch || "") + " · " + esc(device.version || "unknown version") +
-      (device.release_name ? " · " + esc(device.release_name) : "") + "</p>" +
-      (live.ssid ? '<p class="meta">Wi-Fi ' + esc(live.ssid) + (live.ap_ssid ? " · AP " + esc(live.ap_ssid) : "") + " · not editable here</p>" : "") +
-      '<div class="section"><h2>Color</h2><div class="swatches">' + SWATCHES.map((swatch) => {
-        return '<button class="swatch' + (colorKey === swatch.slice(1).join(",") ? " on" : "") + '" type="button" data-action="swatch" data-swatch="' +
-        swatch.slice(1).join(",") + '" aria-label="' + esc(swatch[0]) + '" style="background:rgb(' + swatch.slice(1).join(",") + ')"' +
-        (online ? "" : " disabled") + "></button>";
-      }).join("") + "</div>" +
-      '<button class="btn ghost" type="button" data-action="custom-color"' + (online ? "" : " disabled") + ">Custom color</button></div>" +
-      '<div class="section"><h2>Presets</h2><div class="chips">' + ((live.presets || []).length
-        ? live.presets.map((preset) => '<button class="chip' + (live.state && live.state.ps === preset.id ? " on" : "") +
-          '" type="button" data-action="preset" data-id="' + preset.id + '"' + (online ? "" : " disabled") + ">" + esc(preset.name) + "</button>").join("")
-        : '<p class="meta">No presets stored on this controller.</p>') + "</div></div>" +
-      '<div class="grid3"><button class="btn" type="button" data-action="identify"' + (online ? "" : " disabled") + ">Flash</button>" +
-      '<button class="btn" type="button" data-action="reboot-ask"' + (online ? "" : " disabled") + ">Reboot</button>" +
-      '<button class="btn" type="button" data-action="backup-now">Backup</button></div>' +
-      fold("Segments", segmentBlock(edits, online)) +
-      fold("LED outputs", ledBlock(edits, online)) +
-      fold("Name and mDNS", renameBlock(device, live)) +
-      fold("Backups", backupBlock(device)) +
-      fold("Firmware", '<p class="meta">' + esc(device.profile_name || "No profile") +
-      (device.board ? " · " + esc(device.board) : "") + "</p>" +
-      '<button class="btn primary" type="button" data-action="firmware-open"' + (online ? "" : " disabled") + ">Update firmware</button>" +
-      '<button class="btn ghost" type="button" data-action="secrets-open">PIN and OTA passphrase</button>') +
-      '<button class="btn ghost" type="button" data-action="star">' + (device.starred ? "Unmark" : "Mark") + "</button>" +
-      '<button class="btn danger" type="button" data-action="forget-ask">' + (device.forgotten ? "Bring back" : "Forget") + "</button>";
-  }
-
-  function fold(title, inner) {
-    if (!inner) return "";
-    return '<details class="fold"><summary>' + esc(title) + "</summary>" + inner + "</details>";
-  }
-
-  function segmentBlock(edits, online) {
-    if (!edits.segs.length) return "";
-    return '<div class="section"><h2>Segments</h2>' + edits.segs.map((seg) =>
-      '<div class="card"><strong>Segment ' + Number(seg.id) + '</strong>' +
-      stepper("Start", "seg", seg.id, "start", seg.start) +
-      stepper("End", "seg", seg.id, "stop", seg.stop) +
-      '<button class="btn ghost" type="button" data-action="seg-toggle" data-id="' + seg.id + '" data-field="on">' +
-      (seg.on ? "Segment on" : "Segment off") + "</button>" +
-      '<button class="btn ghost" type="button" data-action="seg-toggle" data-id="' + seg.id + '" data-field="rev">' +
-      (seg.rev ? "Reversed" : "Not reversed") + "</button></div>"
-    ).join("") +
-      '<button class="btn primary" type="button" data-action="seg-apply"' + (online ? "" : " disabled") + ">Apply segments</button></div>";
-  }
-
-  function ledBlock(edits, online) {
-    if (!edits.buses.length) return '<div class="section"><h2>LED outputs</h2><p class="meta">No LED outputs in the saved config yet.</p></div>';
-    return '<div class="section"><h2>LED outputs</h2><p class="meta">Applying this writes the hardware config and reboots the controller. Wi-Fi stays as it is.</p>' +
-      edits.buses.map((bus, index) =>
-        '<div class="card"><strong>Output ' + (index + 1) + (bus.pin != null ? " · pin " + bus.pin : "") + "</strong>" +
-        stepper("Start", "led", index, "start", bus.start) +
-        stepper("Length", "led", index, "len", bus.len) + "</div>"
-      ).join("") +
-      '<button class="btn primary" type="button" data-action="led-ask"' + (online ? "" : " disabled") + ">Apply LED lengths</button></div>";
-  }
-
-  function stepper(label, group, id, field, value) {
-    return '<div class="pair"><span>' + label + '</span><div class="stepper">' +
-      '<button class="step" type="button" data-repeat data-action="nudge" data-group="' + group + '" data-id="' + id +
-      '" data-field="' + field + '" data-dir="-1" aria-label="Decrease ' + label + '">−</button>' +
-      '<input inputmode="numeric" aria-label="' + label + '" value="' + Number(value) + '" data-action="typed" data-group="' +
-      group + '" data-id="' + id + '" data-field="' + field + '">' +
-      '<button class="step" type="button" data-repeat data-action="nudge" data-group="' + group + '" data-id="' + id +
-      '" data-field="' + field + '" data-dir="1" aria-label="Increase ' + label + '">+</button></div></div>';
-  }
-
-  function renameBlock(device, live) {
-    const mdns = (live && live.mdns) || device.mdns || "";
-    return '<div class="section"><h2>Name</h2><label class="field"><span>Server description</span>' +
-      '<input id="rename-name" type="text" maxlength="32" value="' + esc(device.name) + '"></label>' +
-      '<label class="field"><span>mDNS name</span><input id="rename-mdns" type="text" maxlength="32" autocapitalize="off" value="' +
-      esc(mdns) + '"></label><p class="meta">Changing the mDNS name reboots the controller. The display name applies immediately.</p>' +
-      '<button class="btn primary" type="button" data-action="rename">Save name</button></div>';
-  }
-
-  function backupBlock(device) {
-    if (!state.backups.length) {
-      return '<div class="section"><h2>Backups</h2><p class="meta">A backup is taken as soon as this controller is found, then each day and whenever the config changes.</p></div>';
-    }
-    return '<div class="section"><h2>Backups</h2>' + state.backups.map((row) =>
-      '<article class="card"><strong>' + esc(when(row.created_at)) + "</strong>" +
-      '<p class="meta">' + esc(reasonLabel(row.reason)) + " · " + esc(row.version || "") + " · " + bytes(row.byte_size) + "</p>" +
-      '<p class="mono">' + esc(row.content_hash.slice(0, 12)) + "</p>" +
-      '<div class="grid2"><a class="btn" href="#/backup/' + compact(device.mac) + "/" + row.id + '">View</a>' +
-      '<a class="btn" href="#/diff/' + compact(device.mac) + "/" + row.id + '">Diff</a>' +
-      '<button class="btn" type="button" data-action="download-backup" data-id="' + row.id + '">Download</button>' +
-      '<button class="btn danger" type="button" data-action="restore-ask" data-id="' + row.id + '">Restore</button></div></article>'
-    ).join("") + "</div>";
-  }
-
-  function viewBackup() {
-    const row = state.backup;
-    if (!row) return '<p class="boot">Loading backup…</p>';
-    const block = (title, value, text) => "<h2>" + title + "</h2><pre>" + esc(text || JSON.stringify(value, null, 2)) + "</pre>";
-    return '<p class="meta">' + esc(when(row.created_at)) + " · " + esc(reasonLabel(row.reason)) + "</p>" +
-      block("Config", row.cfg, row.cfg_text) + block("Presets", row.presets, row.presets_text) +
-      '<button class="btn" type="button" data-action="download-backup" data-id="' + row.id + '">Download zip</button>' +
-      '<button class="btn danger" type="button" data-action="restore-ask" data-id="' + row.id + '">Restore onto controller</button>';
-  }
-
-  function viewDiff() {
-    const diff = state.diff;
-    if (!diff) return '<p class="boot">Comparing backups…</p>';
-    if (!diff.changes.length) return "<p>These backups match.</p>";
-    return (diff.against ? '<p class="meta">Compared with ' + esc(when(diff.against.created_at)) + "</p>" : "") +
-      diff.changes.map((change) => '<div class="change"><b>' + esc(change.path) + "</b><div>" +
-        esc(showVal(change.before)) + " → " + esc(showVal(change.after)) + "</div></div>").join("") +
-      (diff.truncated ? '<p class="meta">Showing the first 400 changes.</p>' : "");
-  }
-
-  function showVal(value) {
-    if (value == null) return "—";
-    const text = typeof value === "object" ? JSON.stringify(value) : String(value);
-    return text.length > 180 ? text.slice(0, 180) + "…" : text;
-  }
-
-  function viewFirmware() {
-    const profiles = state.profiles.map((profile) =>
-      '<article class="card"><h2>' + esc(profile.name) + '</h2><p class="meta">' + esc(profile.chip_family) +
-      (profile.board ? " · " + esc(profile.board) : "") + '</p><p class="meta">' + esc(profile.notes || "") + "</p>" +
-      '<p class="meta">' + (profile.bin_id ? "Firmware file attached" : "No file attached yet") + "</p></article>"
-    ).join("");
-    const bins = state.bins.map((bin) =>
-      '<article class="card"><strong>' + esc(bin.filename) + '</strong><p class="meta">' + esc(bin.chip_family || "unknown chip") +
-      " · " + bytes(bin.byte_size) + " · " + esc(bin.source) + "</p>" +
-      '<button class="btn danger" type="button" data-action="delete-bin" data-id="' + bin.id + '">Remove file</button></article>'
-    ).join("");
-    const releases = state.releases.map((release) =>
-      "<h2>" + esc(release.tag || release.name) + "</h2>" + release.assets.map((asset) =>
-        '<button class="rowbtn" type="button" data-action="download-asset" data-url="' + esc(asset.url) + '" data-name="' + esc(asset.name) + '">' +
-        "<strong>" + esc(asset.name) + '</strong><br><span class="meta">' + bytes(asset.size) +
-        (asset.board ? " · " + esc(asset.board) : "") + (asset.chip_family ? " · " + esc(asset.chip_family) : "") +
-        "</span></button>"
-      ).join("")
-    ).join("");
-    return '<p class="meta">Dig-Uno v3 and v4 need the Dig-Uno file from QuinLED, not a generic ESP32 image. Older ESP8266 boards use the official WLED ESP8266 file. Ethernet and AE+ hats are separate files. The chip is checked from the file before anything is flashed. Nothing updates on its own.</p>' +
-      '<button class="btn primary" type="button" data-action="add-profiles">Add Dig-Uno profiles</button>' +
-      '<label class="btn filebtn">Upload a .bin<input type="file" accept=".bin,application/octet-stream" data-action="upload-bin"></label>' +
-      '<div class="section"><h2>Profiles</h2>' + (profiles || '<p class="meta">No profiles yet.</p>') + "</div>" +
-      '<div class="section"><h2>Library</h2>' + (bins || '<p class="meta">No firmware files yet.</p>') + "</div>" +
-      '<div class="section"><h2>Releases</h2><div class="grid2">' +
-      '<button class="btn" type="button" data-action="load-releases" data-repo="quinled">QuinLED builds</button>' +
-      '<button class="btn" type="button" data-action="load-releases" data-repo="wled">Official WLED</button></div>' +
-      (releases || '<p class="meta">Load a release list when this host can reach GitHub.</p>') + "</div>";
-  }
-
-  function viewEvents() {
-    if (!state.events.length) return '<p class="meta">Discovery, backups, and updates will show up here.</p>';
-    return state.events.map((event) =>
-      '<article class="card"><p class="meta">' + esc(when(event.ts)) + " · " + esc(event.level) + "</p><p>" +
-      esc(event.message) + "</p></article>"
-    ).join("");
-  }
-
-  function viewSettings() {
-    const settings = state.settings;
-    if (!settings) return '<p class="boot">Loading settings…</p>';
-    const hours = settings.backup_interval / 3600;
-    const minutes = settings.backup_watch_interval / 60;
-    return installBanner() +
-      '<p class="meta">mDNS listens on this host. Add a subnet when controllers are on another VLAN, or when the container cannot see multicast. Leave Wi-Fi editing to the controller itself.</p>' +
-      field("Subnets", "set-subnets", settings.scan_subnets, "192.168.1.0/24") +
-      field("Extra hosts", "set-hosts", settings.extra_hosts, "192.168.1.40") +
-      field("Backup every (hours)", "set-hours", formatNumber(hours), "24") +
-      field("Look for config changes (minutes)", "set-minutes", formatNumber(minutes), "15") +
-      field("Keep this many backups", "set-keep", settings.backup_retention, "30") +
-      field("Full scan every (seconds)", "set-discovery", settings.discovery_interval, "60") +
-      field("Online check every (seconds)", "set-presence", settings.presence_interval, "20") +
-      '<button class="btn primary" type="button" data-action="save-settings">Save</button>' +
-      '<button class="btn ghost" type="button" data-action="reset-settings">Use environment defaults</button>' +
-      '<p class="meta">Password: ' + (settings.auth_enabled ? "on" : "off, set ADMIN_PASSWORD to require one") +
-      ". TLS: " + (settings.tls ? "on" : "off") + ".</p>";
-  }
-
-  function formatNumber(value) {
-    const number = Number(value);
-    if (!Number.isFinite(number)) return "";
-    return Number.isInteger(number) ? String(number) : String(Math.round(number * 100) / 100);
-  }
-
-  function field(label, id, value, placeholder) {
-    return '<label class="field"><span>' + label + '</span><input id="' + id + '" type="text" value="' +
-      esc(value ?? "") + '" placeholder="' + esc(placeholder) + '"></label>';
-  }
-
-  function loginView() {
-    return '<header class="topbar"><span class="mark"></span><h1>WLED Fleet</h1></header><main>' +
-      '<p>This fleet is locked with the server password.</p>' +
-      '<label class="field"><span>Password</span><input id="password" type="password" autocomplete="current-password"></label>' +
-      '<button class="btn primary" type="button" data-action="login">Unlock</button></main>';
-  }
-
-  function sheetHtml() {
-    const sheet = state.sheet;
-    if (!sheet) return "";
-    if (sheet.kind === "color") return colorSheet();
-    if (sheet.kind === "effects" || sheet.kind === "palettes") return choiceSheet();
-    if (sheet.kind === "name") return nameSheet();
-    if (sheet.kind === "group") return groupSheet();
-    if (sheet.kind === "customize") return customizeSheet();
-    if (sheet.kind === "tools") return toolsSheet();
-    if (sheet.kind === "saved") return savedLooksSheet();
-    if (sheet.kind === "more") return customizeSheet();
-    if (sheet.kind === "sections") return sectionsSheet();
-    if (sheet.kind === "firmware") return firmwareSheet();
-    if (sheet.kind === "secrets") return secretsSheet();
-    if (sheet.kind === "results") return resultsSheet();
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(sheet.title) + '"><h2>' + esc(sheet.title) +
-      "</h2><p>" + esc(sheet.body || "") + "</p>" +
-      (sheet.warnings || []).map((item) => '<p class="warn">' + esc(item) + "</p>").join("") +
-      '<button class="btn ' + (sheet.danger ? "danger" : "primary") + '" type="button" data-action="confirm">' + esc(sheet.confirm || "Confirm") +
-      '</button><button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  function customizeSheet() {
-    const effects = (state.control && state.control.effects) || [];
-    const palettes = (state.control && state.control.palettes) || [];
-    const effect = effects[Number(state.look.fx)] || "Solid";
-    const palette = palettes[Number(state.look.pal)] || "Default";
-    const presets = ((state.control && state.control.presets) || []).map((preset) =>
-      '<button type="button" class="choice-card" data-action="apply-preset" data-id="' + preset.id + '"><span>' + esc(preset.name) + '</span><small>Preset ' + preset.id + "</small></button>"
-    ).join("");
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Customize look"><div class="sheet-head"><div><p class="eyebrow">LOOK</p><h2>Customize look</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Done</button></div>' +
-      '<button type="button" class="menu-row" data-action="open-effects"><span><strong>Effect</strong><small>Animation style</small></span><b>' + esc(effect) + " ›</b></button>" +
-      '<button type="button" class="menu-row" data-action="open-palettes"><span><strong>Palette</strong><small>Color sequence</small></span><b>' + esc(palette) + " ›</b></button>" +
-      '<div class="tool-block"><div class="block-title"><span>Speed</span><strong data-look-readout="sx">' + Number(state.look.sx) + '</strong></div><div class="grid2"><button type="button" class="btn" data-action="tune" data-dir="-24">Slower</button><button type="button" class="btn" data-action="tune" data-dir="24">Faster</button></div></div>' +
-      '<div class="tool-block"><div class="block-title"><span>Controller presets</span></div><p class="meta">Preset numbers can behave differently across controller firmware.</p><div class="choice-grid">' +
-      (presets || '<p class="meta">No controller presets available.</p>') + "</div></div>" +
-      '<button type="button" class="btn" data-action="saved-looks">Saved looks</button>' +
-      '<button type="button" class="btn primary" data-action="save-scene"' + (state.lookCurrent ? "" : " disabled") + '>' +
-      (state.lookCurrent ? "Save current look" : "Current look unavailable") + "</button></div>";
-  }
-
-  function toolsSheet() {
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Tools"><div class="sheet-head"><div><p class="eyebrow">CONTROL</p><h2>Tools</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Done</button></div>' +
-      '<button type="button" class="menu-row" data-action="sections"><span><strong>Identify LED sections</strong><small>Temporarily mark outputs and spacing</small></span><b>›</b></button>' +
-      '<button type="button" class="menu-row" data-action="backup-all"><span><strong>Back up all controllers</strong><small>Saves every online controller</small></span><b>›</b></button></div>';
-  }
-
-  function savedLooksSheet() {
-    const scenes = ((state.control && state.control.scenes) || []).map((scene) =>
-      '<button type="button" class="choice-card" data-action="play-scene" data-id="' + scene.id + '"><span>' + esc(scene.name) + "</span><small>Saved look</small></button>"
-    ).join("");
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Saved looks"><div class="sheet-head"><div><p class="eyebrow">LOOKS</p><h2>Saved looks</h2></div><button class="sheet-close" type="button" data-action="customize">Back</button></div>' +
-      '<div class="choice-grid">' + (scenes || '<p class="meta">Save a look to reuse it here.</p>') + "</div></div>";
-  }
-
-  function groupSheet() {
-    const draft = state.groupDraft || { id: null, name: "", members: {} };
-    const rows = state.devices.filter((device) => !device.forgotten).map((device) =>
-      '<label class="member-row"><input type="checkbox" data-action="group-member" data-mac="' + esc(device.mac) + '"' +
-      (draft.members[device.mac] ? " checked" : "") + '><span><strong>' + esc(device.name) + '</strong><small>' + esc(device.ip) + "</small></span></label>"
-    ).join("");
-    const editing = draft.id != null;
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Group settings"><div class="sheet-head"><div><p class="eyebrow">SCOPE</p><h2>' + (editing ? "Edit group" : "New group") + '</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Cancel</button></div>' +
-      '<label class="field"><span>Group name</span><input id="group-name" type="text" maxlength="32" value="' + esc(draft.name) + '"></label>' +
-      '<div class="block-title"><span>Controllers</span><strong>' + Object.keys(draft.members).filter((mac) => draft.members[mac]).length + " selected</strong></div>" +
-      '<div class="member-list">' + rows + "</div>" +
-      '<button class="btn primary" type="button" data-action="save-group">' + (editing ? "Save group" : "Create group") + "</button>" +
-      (editing ? '<button class="btn danger" type="button" data-action="delete-group">Delete group</button>' : "") + "</div>";
-  }
-
-  function choiceSheet() {
-    const kind = state.sheet.kind;
-    const items = kind === "effects" ? ((state.control && state.control.effects) || []) : ((state.control && state.control.palettes) || []);
-    const action = kind === "effects" ? "pick-effect" : "pick-palette";
-    const current = kind === "effects" ? state.look.fx : state.look.pal;
-    const title = kind === "effects" ? "Effects" : "Palettes";
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet choice-sheet" role="dialog" aria-modal="true" aria-label="' + title + '"><div class="sheet-head sticky"><div><p class="eyebrow">CUSTOMIZE</p><h2>' + title + '</h2></div><button class="sheet-close" type="button" data-action="customize">Back</button></div>' +
-      '<input class="choice-search" id="choice-filter" type="search" placeholder="Search ' + title.toLowerCase() + '" aria-label="Search ' + title.toLowerCase() + '">' +
-      '<div class="choice-list">' + (items.length ? items.map((name, index) => {
-        if (kind === "effects") {
-          return '<button type="button" class="rowbtn fxbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><canvas data-preview="effect" data-fx="' + index + '" aria-hidden="true"></canvas><span>' + esc(name) + "</span></button>";
+  function saveLayout() {
+    const lights = [];
+    const zones = [];
+    for (const section of document.querySelectorAll("#zones .zone")) {
+      const zoneId = section.dataset.zone ? Number(section.dataset.zone) : null;
+      if (zoneId) zones.push(zoneId);
+      for (const row of section.querySelectorAll(".ribbon")) {
+        const lightId = Number(row.dataset.id);
+        lights.push({ id: lightId, zone_id: zoneId });
+        const light = S.lights.get(lightId);
+        if (light) {
+          light.zone_id = zoneId;
+          light.position = lights.length;
         }
-        return '<button type="button" class="rowbtn palbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><i style="background:' + paletteGradient(name) + '"></i><span>' + esc(name) + "</span></button>";
-      }).join("") : "<p>This controller did not send a list. The number still applies.</p>") + "</div></div>";
-  }
-
-  function paletteGradient(name) {
-    const text = String(name || "").toLowerCase();
-    if (text.includes("cloud")) return "linear-gradient(90deg,#1c2433,#8aa,#eef)";
-    if (text.includes("ocean") || text.includes("sea") || text.includes("beach")) return "linear-gradient(90deg,#021526,#046,#2ad)";
-    if (text.includes("forest") || text.includes("green")) return "linear-gradient(90deg,#021408,#164,#8c4)";
-    if (text.includes("fire") || text.includes("heat") || text.includes("lava")) return "linear-gradient(90deg,#100,#c20,#fc0,#fff)";
-    if (text.includes("party") || text.includes("rainbow") || text.includes("color")) return "linear-gradient(90deg,#f24,#fd0,#2d4,#2cf,#44f,#d4f)";
-    return "linear-gradient(90deg,#2a140c,#f0a33a,#fff4d2)";
-  }
-
-  function sectionsSheet() {
-    const count = targetMacs().length;
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Identify LED sections"><div class="sheet-head"><div><p class="eyebrow">TOOLS</p><h2>Identify LED sections</h2></div><button class="sheet-close" type="button" data-action="tools">Back</button></div>' +
-      '<p class="meta">Targets ' + count + " included controller" + (count === 1 ? "" : "s") + ". Each output gets its own color, and the previous look returns automatically after 45 seconds.</p>" +
-      '<div class="tool-block"><div class="block-title"><span>Marker spacing</span></div><div class="chips">' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="25">25 LEDs</button>' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="50">50 LEDs</button>' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="100">100 LEDs</button></div>' +
-      '<label class="field"><span>Custom spacing</span><input id="section-every" inputmode="numeric" value="25" aria-label="Custom section size"></label>' +
-      '<button class="btn primary" type="button" data-action="sections-custom">Start identification</button></div></div>';
-  }
-
-  function nameSheet() {
-    const sheet = state.sheet;
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(sheet.title) + '"><h2>' + esc(sheet.title) + "</h2>" +
-      '<label class="field"><span>Name</span><input id="sheet-name" type="text" maxlength="32" value="' + esc(sheet.value || "") + '"></label>' +
-      '<button class="btn primary" type="button" data-action="save-name">Save</button>' +
-      (sheet.mode === "rename" ? '<button class="btn danger" type="button" data-action="delete-group">Delete group</button>' : "") +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  function colorSheet() {
-    const color = state.draftColor;
-    const hex = "#" + [color.r, color.g, color.b].map((part) => part.toString(16).padStart(2, "0")).join("");
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Custom color"><h2>Custom color</h2>' +
-      '<div class="preview" style="background:' + hex + '"></div>' +
-      '<input type="color" aria-label="Color picker" value="' + hex + '" data-action="color-input">' +
-      colorStep("Red", "r") + colorStep("Green", "g") + colorStep("Blue", "b") +
-      '<button class="btn primary" type="button" data-action="apply-color">Use this color</button>' +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  function colorStep(label, key) {
-    return '<div class="pair"><span>' + label + '</span><div class="stepper">' +
-      '<button class="step" type="button" data-repeat data-action="color-step" data-key="' + key + '" data-dir="-1" aria-label="Decrease ' + label + '">−</button>' +
-      '<input inputmode="numeric" aria-label="' + label + '" value="' + state.draftColor[key] + '" data-key="' + key + '" data-action="color-typed">' +
-      '<button class="step" type="button" data-repeat data-action="color-step" data-key="' + key + '" data-dir="1" aria-label="Increase ' + label + '">+</button></div></div>';
-  }
-
-  function firmwareSheet() {
-    const report = (state.pending && state.pending.report) || { bins: [] };
-    const rows = (report.bins || []).map((bin) =>
-      '<button class="rowbtn" type="button" data-action="pick-bin" data-id="' + bin.id + '"' + (bin.ok ? "" : " disabled") + ">" +
-      "<strong>" + esc(bin.filename) + (bin.profile_bin ? " · profile" : "") + "</strong><br><span class='meta'>" +
-      esc(bin.ok ? (bin.warnings && bin.warnings[0]) || bin.reason : bin.reason) + "</span></button>"
-    ).join("");
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Choose firmware"><h2>Choose firmware</h2>' +
-      (rows || '<p>Add a .bin on the Firmware tab first.</p><a class="btn" href="#/firmware">Open firmware</a>') +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  function secretsSheet() {
-    const device = deviceBy(state.route.mac) || {};
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Controller lock"><h2>Controller lock</h2>' +
-      "<p class='meta'>Saved only on this server. " + (device.has_pin ? "A PIN is saved. " : "") +
-      (device.has_ota_passphrase ? "An OTA passphrase is saved." : "") + "</p>" +
-      '<label class="field"><span>Settings PIN</span><input id="secret-pin" type="text" inputmode="numeric" maxlength="8"></label>' +
-      '<label class="field"><span>OTA passphrase</span><input id="secret-ota" type="text" maxlength="64"></label>' +
-      '<button class="btn primary" type="button" data-action="secrets-save">Save</button>' +
-      '<button class="btn ghost" type="button" data-action="secrets-clear">Clear saved secrets</button>' +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  function focusRename() {
-    const input = document.querySelector(".rename-input");
-    if (!input) return;
-    input.focus();
-    input.select();
-  }
-
-  function armSectionTimer() {
-    clearTimeout(state.sectionTimer);
-    if (!state.sections || !state.sections.until) return;
-    const wait = Math.max(0, state.sections.until - Date.now());
-    state.sectionTimer = setTimeout(() => {
-      state.sections = null;
-      refreshControl(true);
-    }, wait + 300);
-  }
-
-  async function runSections(every) {
-    const macs = targetMacs();
-    if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
-    const size = Number(every);
-    if (!Number.isFinite(size) || size < 1) throw new Error("Enter a section size.");
-    state.sheet = null;
-    state.sections = { pending: true, every: size, devices: [], until: 0 };
-    render();
-    const result = await api("/api/control/sections", { method: "POST", body: JSON.stringify({ macs, every: size }) });
-    const failed = (result.results || []).filter((row) => !row.ok);
-    if (!(result.devices || []).length) {
-      state.sections = null;
-      render();
-      throw new Error((failed[0] && (failed[0].error || failed[0].name)) || "Could not light sections");
-    }
-    state.sections = {
-      pending: false,
-      every: size,
-      devices: result.devices,
-      until: Date.now() + (Number(result.timeout) || 45) * 1000,
-    };
-    armSectionTimer();
-    render();
-    if (failed.length) toast((failed[0].name || "A board") + " did not mark");
-  }
-
-  async function restoreSections() {
-    const listed = ((state.sections && state.sections.devices) || []).map((device) => device.mac);
-    const macs = listed.length ? listed : targetMacs();
-    clearTimeout(state.sectionTimer);
-    state.sections = null;
-    render();
-    if (macs.length) await api("/api/control/sections/restore", { method: "POST", body: JSON.stringify({ macs }) });
-    await refreshControl(true);
-  }
-
-  function resultsSheet() {
-    const rows = (state.pending && state.pending.results) || [];
-    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Results"><h2>Results</h2>' +
-      rows.map((row) => '<p>' + esc(row.name || row.mac) + ": " + (row.ok ? "done" : esc(row.error || "failed")) + "</p>").join("") +
-      '<button class="btn" type="button" data-action="close-sheet">Close</button></div>';
-  }
-
-  async function load(resetScroll, options) {
-    const generation = ++loadGeneration;
-    const route = parseRoute();
-    state.route = route;
-    const controlRequestId = ++controlGeneration;
-    const paintEarly = !options || options.paintEarly !== false;
-    if (state.devices.length || state.control) state.booting = false;
-    let painted = false;
-    if (paintEarly && !state.booting && canRepaint()) {
-      render({ resetScroll: !!resetScroll, transition: !!resetScroll });
-      painted = true;
-    }
-    try {
-      if (state.session.required && !state.session.ok) {
-        state.booting = false;
-        if (generation === loadGeneration) render({ resetScroll: true });
-        return;
-      }
-      const devices = await api("/api/devices");
-      if (generation !== loadGeneration) return;
-      state.devices = devices;
-      const status = await api("/api/status");
-      if (generation !== loadGeneration) return;
-      state.status = status;
-      if (route.name === "control") {
-        const groupId = state.groupId;
-        const query = groupId ? "?group=" + groupId : "";
-        const data = await api("/api/control" + query);
-        if (generation !== loadGeneration || controlRequestId !== controlGeneration || state.groupId !== groupId) return;
-        applyFlashOverlay(data);
-        state.control = data;
-      }
-      if (route.name === "device" && !state.hold) {
-        const live = await api("/api/devices/" + route.mac + "/live");
-        if (generation !== loadGeneration) return;
-        state.live = live;
-        const backups = await api("/api/devices/" + route.mac + "/backups");
-        if (generation !== loadGeneration) return;
-        state.backups = backups;
-      }
-      if (route.name === "backup") {
-        const backup = await api("/api/backups/" + route.id);
-        if (generation !== loadGeneration) return;
-        state.backup = backup;
-      }
-      if (route.name === "diff") {
-        const diff = await api("/api/backups/" + route.id + "/diff");
-        if (generation !== loadGeneration) return;
-        state.diff = diff;
-      }
-      if (route.name === "firmware") {
-        const bins = await api("/api/firmware/bins");
-        if (generation !== loadGeneration) return;
-        state.bins = bins;
-        const profiles = await api("/api/firmware/profiles");
-        if (generation !== loadGeneration) return;
-        state.profiles = profiles;
-      }
-      if (route.name === "events") {
-        const events = await api("/api/events");
-        if (generation !== loadGeneration) return;
-        state.events = events;
-      }
-      if (route.name === "settings") {
-        const settings = await api("/api/settings");
-        if (generation !== loadGeneration) return;
-        state.settings = settings;
-      }
-      if (generation !== loadGeneration) return;
-      state.error = "";
-    } catch (error) {
-      if (generation === loadGeneration && error.message !== "Sign in required" && !state.devices.length && !state.control) state.error = error.message;
-    }
-    if (generation !== loadGeneration) return;
-    state.booting = false;
-    persistUi();
-    if (canRepaint()) render({ resetScroll: !!resetScroll && !painted });
-    focusRename();
-  }
-
-  async function refresh() {
-    await load(false);
-  }
-
-  function ensureEdits(device) {
-    if (!state.edits || state.edits.mac !== compact(device.mac)) {
-      const base = currentSegs(device);
-      state.edits = { mac: compact(device.mac), buses: base.buses.map((bus) => ({ ...bus })), segs: base.segs.map((seg) => ({ ...seg })) };
-    }
-    return state.edits;
-  }
-
-  function nudgeEdit(group, id, field, delta) {
-    const device = deviceBy(state.route.mac);
-    if (!device) return;
-    const edits = ensureEdits(device);
-    const list = group === "led" ? edits.buses : edits.segs;
-    const item = list[group === "led" ? Number(id) : list.findIndex((seg) => String(seg.id) === String(id))];
-    if (!item) return;
-    const max = field === "len" || field === "stop" || field === "start" ? 8192 : 8192;
-    item[field] = Math.max(0, Math.min(max, Number(item[field] || 0) + delta));
-    render();
-  }
-
-  function selectedMacs() {
-    return Object.keys(state.selected);
-  }
-
-  async function run(button, label, work) {
-    const previous = button ? button.textContent : "";
-    if (button) { button.disabled = true; button.textContent = label; }
-    try {
-      await work();
-    } catch (error) {
-      if (error.message !== "Sign in required") toast(error.message);
-    } finally {
-      if (button && button.isConnected) {
-        button.disabled = false;
-        if (button.textContent === label) button.textContent = previous;
       }
     }
+    api("/api/layout", { method: "PUT", body: { zones, lights } }).catch((error) => toast(error.message));
+    renderHome();
   }
 
-  async function postState(body) {
-    const mac = state.route.mac;
-    const next = await api("/api/devices/" + mac + "/state", { method: "POST", body: JSON.stringify(body) });
-    if (state.live) state.live.state = next.state || next;
-    const power = document.querySelector("[data-role=power]");
-    const readout = document.getElementById("bri-readout");
-    const range = document.getElementById("bri-range");
-    const on = !!(state.live && state.live.state && state.live.state.on);
-    const bri = state.live && state.live.state ? Number(state.live.state.bri || 0) : 0;
-    if (power) {
-      power.textContent = on ? "Turn off" : "Turn on";
-      power.classList.toggle("primary", on);
-      power.classList.toggle("ghost", !on);
-      power.setAttribute("aria-pressed", on ? "true" : "false");
-    }
-    if (readout) readout.textContent = Math.round(bri / 255 * 100) + "% · " + bri;
-    if (range && document.activeElement !== range) range.value = String(bri);
+  // Two-finger swipe down anywhere undoes the last change.
+  (function bindUndoGesture() {
+    let start = null;
+    document.addEventListener("touchstart", (event) => {
+      start = event.touches.length === 2 ? [...event.touches].map((touch) => touch.clientY) : null;
+    }, { passive: true });
+    document.addEventListener("touchend", (event) => {
+      if (!start || event.touches.length) return;
+      const ends = [...event.changedTouches].map((touch) => touch.clientY);
+      if (ends.length && ends.every((y, i) => y - (start[i] ?? start[0]) > 60)) undo();
+      start = null;
+    }, { passive: true });
+  })();
+
+  // ----- selection ---------------------------------------------------------
+
+  function selectSet(ids, open) {
+    S.selection = new Set(ids);
+    S.multi = false;
+    haptic("light");
+    refreshChrome();
+    saveView();
+    if (open && ids.length) openSheet("rest");
   }
 
-  async function confirmPending() {
-    const pending = state.pending || {};
-    state.pending = null;
-    const returnAction = state.sheetReturn;
-    state.sheet = null;
-    render();
-    if (pending.type === "group-delete") {
-      await api("/api/groups/" + pending.id, { method: "DELETE" });
-      if (Number(state.groupId) === Number(pending.id)) state.groupId = null;
-      state.groupDraft = null;
-      await refreshControl(true);
-    } else if (pending.type === "reboot") {
-      await api("/api/devices/" + pending.mac + "/reboot", { method: "POST" });
-      toast("Rebooted");
-    } else if (pending.type === "forget") {
-      await api("/api/devices/" + pending.mac + "/forget", { method: "POST", body: JSON.stringify({ on: !pending.forgotten }) });
-    } else if (pending.type === "restore") {
-      const job = await api("/api/backups/" + pending.id + "/restore", { method: "POST" });
-      await watchJob(job);
-    } else if (pending.type === "leds") {
-      await api("/api/devices/" + pending.mac + "/leds", { method: "POST", body: JSON.stringify({ buses: pending.buses }) });
-      state.edits = null;
-      toast("LED lengths saved");
-    } else if (pending.type === "firmware") {
-      const job = await api("/api/bulk/firmware", {
-        method: "POST",
-        body: JSON.stringify({ macs: pending.macs, bin_id: pending.binId, force: false }),
-      });
-      await watchJob(job);
-    } else if (pending.type === "bulk-reboot") {
-      await watchJob(await api("/api/bulk/reboot", { method: "POST", body: JSON.stringify({ macs: pending.macs }) }));
-    } else if (pending.type === "bulk-backup") {
-      await watchJob(await api("/api/bulk/backup", { method: "POST", body: JSON.stringify({ macs: pending.macs }) }));
-    }
-    await load(false);
-    focusAction(returnAction);
+  function toggleMulti(id) {
+    if (S.selection.has(id)) S.selection.delete(id);
+    else S.selection.add(id);
+    S.multi = S.selection.size > 0;
+    refreshChrome();
+    saveView();
   }
 
-  async function watchJob(job) {
-    state.job = job;
-    sessionStorage.setItem("fleet-job", job.id);
-    while (job && (job.status === "queued" || job.status === "running")) {
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      job = await api("/api/jobs/" + job.id);
-      state.job = job;
-    }
-    sessionStorage.removeItem("fleet-job");
-    const failed = (job.results || []).filter((row) => !row.ok);
-    if (failed.length) {
-      state.pending = { results: job.results };
-      state.sheet = { kind: "results" };
-    } else {
-      toast("Done");
-    }
-    state.job = null;
+  function clearSelection() {
+    S.selection.clear();
+    S.multi = false;
+    refreshChrome();
+    saveView();
   }
 
-  async function onClick(event) {
-    const target = event.target.closest("[data-action]");
-    if (!target || target.dataset.repeat) return;
-    const action = target.dataset.action;
-    if (action === "close-sheet") {
-      if (state.sheet && state.sheet.kind === "confirm" && state.pending && state.pending.returnSheet) {
-        state.sheet = state.pending.returnSheet;
-        state.pending = null;
-      } else {
-        state.sheet = null;
-      }
-      render();
-      return;
-    }
-    if (action === "pick-board") {
-      const mac = target.dataset.mac;
-      if (state.skipped[mac]) delete state.skipped[mac];
-      else state.skipped[mac] = true;
-      state.justSelected = mac;
-      render();
-      return;
-    }
-    if (action === "rename-start") {
-      event.preventDefault();
-      state.renaming = target.dataset.mac;
-      render();
-      focusRename();
-      return;
-    }
-    if (action === "flash") {
-      const mac = target.dataset.mac;
-      const before = copyBoards([mac]);
-      state.flashUntil[mac] = Date.now() + 3000;
-      paintOptimistic([mac], { on: true, bri: 255, col: [[255, 255, 255], [0, 0, 0], [0, 0, 0]] });
-      pulseTiles([mac], [255, 255, 255]);
-      await run(target, "…", async () => {
-        try {
-          await api("/api/devices/" + compact(mac) + "/identify", { method: "POST" });
-        } catch (error) {
-          delete state.flashUntil[mac];
-          restoreBoards(before);
-          throw error;
-        }
-        delete state.flashUntil[mac];
-        await refreshControl(true);
-      });
-      return;
-    }
-    if (action === "sections") {
-      state.sheet = { kind: "sections" };
-      render();
-      return;
-    }
-    if (action === "sections-go" || action === "sections-custom") {
-      const every = action === "sections-custom" ? Number(value("section-every")) : Number(target.dataset.every);
-      await run(target, "…", () => runSections(every));
-      return;
-    }
-    if (action === "sections-done") {
-      await run(target, "…", restoreSections);
-      return;
-    }
-    if (action === "use-group") {
-      state.groupId = target.dataset.id ? Number(target.dataset.id) : null;
-      state.skipped = {};
-      render();
-      await refreshControl(true);
-      return;
-    }
-    if (action === "quick-look") {
-      const preset = LOOKS.filter((item) => item.name === target.dataset.name)[0];
-      if (!preset) return;
-      state.lastLook = preset.name;
-      const look = Object.assign({}, preset.look);
-      if (preset.effect) look.fx = effectId(preset.effect);
-      await run(target, preset.name, () => pushLook("direct", null, look));
-      return;
-    }
-    if (action === "group-power") {
-      const turnOn = !groupIsOn();
-      await run(target, turnOn ? "On…" : "Off…", () => pushLook("direct", null, turnOn ? { on: true, bri: Math.max(Number(state.look.bri) || 0, 140) } : { on: false }));
-      return;
-    }
-    if (action === "backup-all") {
-      await run(target, "Backing up…", async () => {
-        const macs = state.devices.filter((device) => device.online && !device.forgotten).map((device) => device.mac);
-        if (!macs.length) throw new Error("No boards are on the network.");
-        await watchJob(await api("/api/bulk/backup", { method: "POST", body: JSON.stringify({ macs }) }));
-      });
-      return;
-    }
-    if (action === "undo") {
-      const frames = state.undo || [];
-      state.undo = null;
-      state.holdingUndo = false;
-      await run(target, "Undoing…", async () => {
-        const results = { results: [] };
-        for (let index = 0; index < frames.length; index += 1) {
-          const frame = frames[index];
-          const response = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs: [frame.mac], look: frame.look, sync: false }) });
-          results.results = results.results.concat(response.results || []);
-        }
-        noteResults(results);
-      });
-      return;
-    }
-    if (action === "more" || action === "customize") {
-      state.sheet = { kind: "customize" };
-      render();
-      return;
-    }
-    if (action === "tools") {
-      state.sheet = { kind: "tools" };
-      render();
-      return;
-    }
-    if (action === "saved-looks") {
-      state.sheet = { kind: "saved" };
-      render();
-      return;
-    }
-    if (action === "edit-group") {
-      const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
-      if (!group) return;
-      const members = {};
-      (group.macs || []).forEach((mac) => { members[mac] = true; });
-      state.groupDraft = { id: group.id, name: group.name, members };
-      state.sheet = { kind: "group" };
-      render();
-      return;
-    }
-    if (action === "new-group") {
-      state.groupDraft = { id: null, name: "", members: {} };
-      state.sheet = { kind: "group" };
-      render();
-      setTimeout(() => { const input = document.getElementById("group-name"); if (input) input.focus(); }, 0);
-      return;
-    }
-    if (action === "save-group") {
-      const draft = state.groupDraft || { id: null, members: {} };
-      const name = value("group-name");
-      const macs = Object.keys(draft.members).filter((mac) => draft.members[mac]);
-      await run(target, "Saving…", async () => {
-        if (!name) throw new Error("Enter a group name.");
-        let group;
-        if (draft.id == null) {
-          group = await api("/api/groups", { method: "POST", body: JSON.stringify({ name, macs }) });
-        } else {
-          group = await api("/api/groups/" + draft.id, { method: "PATCH", body: JSON.stringify({ name, macs }) });
-        }
-        const returnAction = state.sheetReturn;
-        state.groupId = group.id;
-        state.groupDraft = null;
-        state.sheet = null;
-        state.skipped = {};
-        render();
-        await refreshControl(true);
-        focusAction(returnAction);
-      });
-      return;
-    }
-    if (action === "save-scene") {
-      state.sheet = { kind: "name", mode: "scene", title: "Save look", value: "" };
-      render();
-      return;
-    }
-    if (action === "save-name") {
-      const name = value("sheet-name");
-      const sheet = state.sheet;
-      await run(target, "Saving…", async () => {
-        if (sheet.mode === "scene") {
-          await api("/api/scenes", { method: "POST", body: JSON.stringify({ name, look: currentLook() }) });
-        }
-        const returnAction = state.sheetReturn;
-        state.sheet = null;
-        render();
-        await refreshControl(true);
-        focusAction(returnAction);
-      });
-      return;
-    }
-    if (action === "delete-group") {
-      const draft = state.groupDraft;
-      if (!draft || draft.id == null) return;
-      state.pending = { type: "group-delete", id: draft.id, returnSheet: { kind: "group" } };
-      state.sheet = { kind: "confirm", title: "Delete group?", body: draft.name + " will be removed. Controllers and backups are not deleted.", confirm: "Delete group", danger: true };
-      render();
-      return;
-    }
-    if (action === "look-color") {
-      state.colorSlot = Number(target.dataset.slot);
-      const color = state.look.col[state.colorSlot] || [255, 170, 70];
-      state.draftColor = { r: color[0], g: color[1], b: color[2] };
-      state.sheet = { kind: "color" };
-      render();
-      return;
-    }
-    if (action === "look-power") {
-      await run(target, "…", () => pushLook("direct", null, { on: !groupIsOn() }));
-      return;
-    }
-    if (action === "open-effects") {
-      state.sheet = { kind: "effects" };
-      render();
-      return;
-    }
-    if (action === "open-palettes") {
-      state.sheet = { kind: "palettes" };
-      render();
-      return;
-    }
-    if (action === "pick-effect" || action === "pick-palette") {
-      const key = action === "pick-effect" ? "fx" : "pal";
-      const selected = Number(target.dataset.id);
-      state.look[key] = selected;
-      await run(target, "…", async () => {
-        await pushLook("direct", null, { on: true, [key]: selected });
-        state.sheet = { kind: "customize" };
-        render();
-      });
-      return;
-    }
-    if (action === "apply-preset" || action === "play-scene") {
-      await run(target, "…", () => pushLook(action, target.dataset.id));
-      render();
-      return;
-    }
-    if (action === "tune") {
-      const delta = Number(target.dataset.dir);
-      const device = (state.control.devices || []).find((item) => targetMacs().indexOf(item.mac) >= 0);
-      const next = Math.max(0, Math.min(255, Number(device ? device.sx : state.look.sx) + delta));
-      state.look.sx = next;
-      await run(target, "…", async () => {
-        await pushLook("direct", null, { sx: next });
-        render();
-      });
-      return;
-    }
-    if (action === "confirm") {
-      await run(target, "Working…", confirmPending);
-      return;
-    }
-    if (action === "refresh" || action === "scan") {
-      await run(target, "Scanning…", async () => {
-        await api("/api/scan", { method: "POST" });
-        await load(false);
-      });
-      return;
-    }
-    if (action === "select-toggle") {
-      state.selecting = !state.selecting;
-      if (!state.selecting) state.selected = {};
-      render();
-      return;
-    }
-    if (action === "forgotten-toggle") {
-      state.showForgotten = !state.showForgotten;
-      render();
-      return;
-    }
-    if (action === "login") {
-      await run(target, "Checking…", async () => {
-        await api("/api/login", { method: "POST", body: JSON.stringify({ password: document.getElementById("password").value }) });
-        state.session = { required: true, ok: true };
-        await load(true);
-      });
-      return;
-    }
-    if (action === "power") {
-      const on = target.getAttribute("aria-pressed") === "true";
-      await run(target, on ? "Turning off…" : "Turning on…", () => postState({ on: !on }));
-      return;
-    }
-    if (action === "swatch") {
-      const parts = target.dataset.swatch.split(",").map(Number);
-      await run(target, "…", async () => {
-        const next = await api("/api/devices/" + state.route.mac + "/color", {
-          method: "POST",
-          body: JSON.stringify({ r: parts[0], g: parts[1], b: parts[2], segment: 0, on: true }),
-        });
-        if (state.live) state.live.state = next.state || next;
-        render();
-      });
-      return;
-    }
-    if (action === "custom-color") {
-      const current = state.live && state.live.state && state.live.state.seg && state.live.state.seg[0].col;
-      if (current && current[0]) state.draftColor = { r: current[0][0], g: current[0][1], b: current[0][2] };
-      state.sheet = { kind: "color" };
-      render();
-      return;
-    }
-    if (action === "apply-color") {
-      const color = state.draftColor;
-      if (state.route.name === "control") {
-        state.look.col[state.colorSlot] = [color.r, color.g, color.b];
-        state.sheet = null;
-        render();
-        return;
-      }
-      await run(target, "Setting…", async () => {
-        const next = await api("/api/devices/" + state.route.mac + "/color", {
-          method: "POST",
-          body: JSON.stringify({ r: color.r, g: color.g, b: color.b, segment: 0, on: true }),
-        });
-        if (state.live) state.live.state = next.state || next;
-        state.sheet = null;
-      });
-      await load(false);
-      return;
-    }
-    if (action === "preset") {
-      await run(target, "Applying…", () => postState({ ps: Number(target.dataset.id) }));
-      render();
-      return;
-    }
-    if (action === "identify") {
-      await run(target, "Flashing…", () => api("/api/devices/" + state.route.mac + "/identify", { method: "POST" }));
-      return;
-    }
-    if (action === "backup-now") {
-      await run(target, "Saving…", async () => {
-        await api("/api/devices/" + state.route.mac + "/backup", { method: "POST" });
-        toast("Backup saved");
-        await load(false);
-      });
-      return;
-    }
-    if (action === "star") {
-      const device = deviceBy(state.route.mac);
-      await api("/api/devices/" + state.route.mac + "/star", { method: "POST", body: JSON.stringify({ on: !device.starred }) });
-      await load(false);
-      return;
-    }
-    if (action === "reboot-ask") {
-      const device = deviceBy(state.route.mac);
-      state.pending = { type: "reboot", mac: device.mac };
-      state.sheet = { kind: "confirm", title: "Reboot " + device.name + "?", body: "The lights go out for a few seconds.", confirm: "Reboot" };
-      render();
-      return;
-    }
-    if (action === "forget-ask") {
-      const device = deviceBy(state.route.mac);
-      state.pending = { type: "forget", mac: device.mac, forgotten: device.forgotten };
-      state.sheet = device.forgotten
-        ? { kind: "confirm", title: "Bring back " + device.name + "?", body: "Backups and checks start again.", confirm: "Bring back" }
-        : { kind: "confirm", title: "Forget " + device.name + "?", body: "It stays in the forgotten list and keeps its backups. It will not be updated or backed up.", confirm: "Forget", danger: true };
-      render();
-      return;
-    }
-    if (action === "seg-toggle") {
-      const device = deviceBy(state.route.mac);
-      const edits = ensureEdits(device);
-      const seg = edits.segs.find((item) => String(item.id) === target.dataset.id);
-      if (seg) seg[target.dataset.field] = !seg[target.dataset.field];
-      render();
-      return;
-    }
-    if (action === "seg-apply") {
-      const device = deviceBy(state.route.mac);
-      const edits = ensureEdits(device);
-      await run(target, "Applying…", async () => {
-        await api("/api/devices/" + state.route.mac + "/segments", { method: "POST", body: JSON.stringify({ segments: edits.segs }) });
-        state.edits = null;
-        toast("Segments updated");
-        await load(false);
-      });
-      return;
-    }
-    if (action === "led-ask") {
-      const device = deviceBy(state.route.mac);
-      const edits = ensureEdits(device);
-      state.pending = { type: "leds", mac: device.mac, buses: edits.buses.map((bus) => ({ start: Number(bus.start), len: Number(bus.len) })) };
-      state.sheet = { kind: "confirm", title: "Apply LED lengths?", body: "The controller reboots. Wi-Fi settings are left alone.", confirm: "Apply and reboot" };
-      render();
-      return;
-    }
-    if (action === "rename") {
-      await run(target, "Saving…", async () => {
-        await api("/api/devices/" + state.route.mac + "/rename", {
-          method: "POST",
-          body: JSON.stringify({
-            name: document.getElementById("rename-name").value,
-            mdns: document.getElementById("rename-mdns").value,
-          }),
-        });
-        toast("Name saved");
-        await load(false);
-      });
-      return;
-    }
-    if (action === "restore-ask") {
-      state.pending = { type: "restore", id: Number(target.dataset.id) };
-      state.sheet = {
-        kind: "confirm",
-        title: "Restore this backup?",
-        body: "The current config is backed up first, then the controller reboots.",
-        confirm: "Restore",
-        danger: true,
-      };
-      render();
-      return;
-    }
-    if (action === "download-backup") {
-      await run(target, "Preparing…", async () => {
-        const response = await fetch("/api/backups/" + target.dataset.id + "/download");
-        if (!response.ok) throw new Error("Download failed");
-        const blob = await response.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = "wled-backup-" + target.dataset.id + ".zip";
-        link.click();
-        URL.revokeObjectURL(url);
-      });
-      return;
-    }
-    if (action === "firmware-open" || action === "bulk-firmware") {
-      const macs = action === "bulk-firmware" ? selectedMacs() : [deviceBy(state.route.mac).mac];
-      if (!macs.length) { toast("Select a controller"); return; }
-      await run(target, "Checking…", async () => {
-        state.bins = await api("/api/firmware/bins");
-        const report = await api("/api/firmware/check", { method: "POST", body: JSON.stringify({ macs, bin_id: null }) });
-        state.pending = { type: "firmware", macs, report: mergeReports(report.devices) };
-        state.sheet = { kind: "firmware" };
-        render();
-      });
-      return;
-    }
-    if (action === "pick-bin") {
-      const pending = state.pending;
-      const bin = (pending.report.bins || []).find((item) => String(item.id) === target.dataset.id);
-      pending.binId = Number(target.dataset.id);
-      state.sheet = {
-        kind: "confirm",
-        title: "Update " + pending.macs.length + " controller" + (pending.macs.length > 1 ? "s" : "") + "?",
-        body: "A backup runs first. The controller reboots and is checked afterwards.",
-        confirm: "Update",
-        warnings: bin ? bin.warnings : [],
-      };
-      render();
-      return;
-    }
-    if (action === "bulk-backup" || action === "bulk-reboot") {
-      const macs = selectedMacs();
-      if (!macs.length) { toast("Select a controller"); return; }
-      state.pending = { type: action, macs };
-      state.sheet = {
-        kind: "confirm",
-        title: action === "bulk-backup" ? "Back up " + macs.length + " controllers?" : "Reboot " + macs.length + " controllers?",
-        body: action === "bulk-reboot" ? "They go offline for a few seconds, one after another." : "Identical configs are not stored twice.",
-        confirm: action === "bulk-backup" ? "Back up" : "Reboot",
-      };
-      render();
-      return;
-    }
-    if (action === "add-profiles") {
-      await run(target, "Adding…", async () => {
-        state.profiles = await api("/api/firmware/profiles/defaults", { method: "POST" });
-        toast("Profiles added");
-        render();
-      });
-      return;
-    }
-    if (action === "delete-bin") {
-      await run(target, "Removing…", async () => {
-        await api("/api/firmware/bins/" + target.dataset.id, { method: "DELETE" });
-        await load(false);
-      });
-      return;
-    }
-    if (action === "load-releases") {
-      const settings = state.settings || await api("/api/settings");
-      const repo = target.dataset.repo === "wled" ? settings.wled_github_repo : settings.quinled_github_repo;
-      await run(target, "Loading…", async () => {
-        const payload = await api("/api/firmware/releases?repo=" + encodeURIComponent(repo));
-        state.releases = payload.releases;
-        render();
-      });
-      return;
-    }
-    if (action === "download-asset") {
-      await run(target, "Downloading…", async () => {
-        await api("/api/firmware/fetch", {
-          method: "POST",
-          body: JSON.stringify({ url: target.dataset.url, filename: target.dataset.name }),
-        });
-        toast("Saved to the library");
-        state.bins = await api("/api/firmware/bins");
-        render();
-      });
-      return;
-    }
-    if (action === "save-settings") {
-      await run(target, "Saving…", async () => {
-        state.settings = await api("/api/settings", {
-          method: "PUT",
-          body: JSON.stringify({
-            scan_subnets: value("set-subnets"),
-            extra_hosts: value("set-hosts"),
-            backup_interval: Number(value("set-hours")) * 3600,
-            backup_watch_interval: Number(value("set-minutes")) * 60,
-            backup_retention: Number(value("set-keep")),
-            discovery_interval: Number(value("set-discovery")),
-            presence_interval: Number(value("set-presence")),
-          }),
-        });
-        toast("Saved");
-        render();
-      });
-      return;
-    }
-    if (action === "reset-settings") {
-      state.settings = await api("/api/settings", { method: "PUT", body: JSON.stringify({ reset: true }) });
-      toast("Using environment defaults");
-      render();
-      return;
-    }
-    if (action === "secrets-open") {
-      state.sheet = { kind: "secrets" };
-      render();
-      return;
-    }
-    if (action === "secrets-save" || action === "secrets-clear") {
-      const body = action === "secrets-clear"
-        ? { clear_pin: true, clear_ota: true }
-        : { pin: value("secret-pin"), ota_passphrase: value("secret-ota") };
-      await run(target, "Saving…", async () => {
-        await api("/api/devices/" + state.route.mac + "/secrets", { method: "POST", body: JSON.stringify(body) });
-        state.sheet = null;
-        toast("Saved");
-        await load(false);
-      });
-      return;
-    }
-    if (action === "dismiss-install") {
-      localStorage.setItem("install-dismissed", "1");
-      render();
-      return;
-    }
-    if (action === "install" && state.installEvent) {
-      state.installEvent.prompt();
-      state.installEvent = null;
-      render();
+  function renderHandle() {
+    const handle = $("#handle");
+    const show = S.selection.size > 0 && S.sheet === "closed" && !S.screen;
+    handle.classList.toggle("up", show);
+    $("#handle-label").textContent = selectionLabel();
+    const swatches = $("#handle-swatches");
+    const ids = [...S.selection].slice(0, 3);
+    if (swatches.dataset.ids !== ids.join(",")) {
+      swatches.dataset.ids = ids.join(",");
+      swatches.replaceChildren(...ids.map((id) => { const c = el("canvas"); c._light = id; return c; }));
     }
   }
 
-  function value(id) {
-    const node = document.getElementById(id);
-    return node ? node.value.trim() : "";
-  }
-
-  function mergeReports(devices) {
-    const first = devices[0] || { bins: [] };
-    if (devices.length < 2) return first;
-    const bins = first.bins.map((bin) => {
-      const problems = devices.map((device) => {
-        const match = (device.bins || []).find((item) => item.id === bin.id);
-        return match && match.ok ? null : (device.name + ": " + ((match && match.reason) || "not compatible"));
-      }).filter(Boolean);
-      return { ...bin, ok: problems.length === 0, reason: problems[0] || bin.reason, warnings: bin.warnings || [] };
+  (function bindHandle() {
+    const handle = $("#handle");
+    let start = null;
+    handle.addEventListener("pointerdown", (event) => {
+      start = { y: event.clientY, t: Date.now(), onLabel: Boolean(event.target.closest("#handle-label")) };
+      handle.setPointerCapture(event.pointerId);
+      clearTimeout(handle._long);
+      handle._long = setTimeout(() => { start = null; haptic("light"); saveFavoriteFlow(); }, 520);
     });
-    return { bins };
-  }
-
-  function onChange(event) {
-    const target = event.target;
-    if (target.dataset.action === "upload-bin" && target.files && target.files[0]) {
-      uploadBin(target.files[0], null);
-      target.value = "";
-    }
-    if (target.dataset.action === "toggle-select") {
-      if (target.checked) state.selected[target.dataset.mac] = true;
-      else delete state.selected[target.dataset.mac];
-      const count = document.querySelector(".actionbar button");
-      if (count) count.textContent = "Backup " + Object.keys(state.selected).length;
-    }
-    if (target.id === "bri-range") {
-      state.hold = false;
-      postState({ bri: Number(target.value) }).catch((error) => toast(error.message));
-    }
-    if (target.id === "look-range") {
-      state.hold = false;
-      state.look.bri = Number(target.value);
-      queueBrightness();
-    }
-    if (target.dataset.action === "group-member") {
-      if (!state.groupDraft) return;
-      state.groupDraft.name = value("group-name");
-      state.groupDraft.members[target.dataset.mac] = target.checked;
-      const count = document.querySelector(".block-title strong");
-      if (count) count.textContent = Object.keys(state.groupDraft.members).filter((mac) => state.groupDraft.members[mac]).length + " selected";
-    }
-    if (target.dataset.action === "typed") {
-      const device = deviceBy(state.route.mac);
-      if (!device) return;
-      const edits = ensureEdits(device);
-      const list = target.dataset.group === "led" ? edits.buses : edits.segs;
-      const item = target.dataset.group === "led"
-        ? list[Number(target.dataset.id)]
-        : list.find((seg) => String(seg.id) === target.dataset.id);
-      if (item) item[target.dataset.field] = Number(target.value || 0);
-    }
-    if (target.dataset.action === "color-input") {
-      const hex = target.value.replace("#", "");
-      state.draftColor = { r: parseInt(hex.slice(0, 2), 16), g: parseInt(hex.slice(2, 4), 16), b: parseInt(hex.slice(4, 6), 16) };
-      render();
-    }
-    if (target.dataset.action === "color-typed") {
-      state.draftColor[target.dataset.key] = clamp(target.value);
-      render();
-    }
-  }
-
-  function onInput(event) {
-    if (event.target.id === "choice-filter") {
-      const query = event.target.value.trim().toLowerCase();
-      document.querySelectorAll("[data-choice]").forEach((node) => {
-        node.hidden = query && !node.dataset.choice.includes(query);
-      });
-      return;
-    }
-    if (event.target.id === "group-name" && state.groupDraft) {
-      state.groupDraft.name = event.target.value;
-      return;
-    }
-    if (event.target.id === "look-range") {
-      state.hold = true;
-      state.look.bri = Number(event.target.value);
-      return;
-    }
-    if (event.target.id === "bri-range") {
-      state.hold = true;
-      const readout = document.getElementById("bri-readout");
-      const value = Number(event.target.value);
-      if (readout) readout.textContent = Math.round(value / 255 * 100) + "% · " + value;
-      const now = Date.now();
-      if (!state._briAt || now - state._briAt > 160) {
-        state._briAt = now;
-        postState({ bri: value }).catch(() => {});
-      }
-    }
-  }
-
-  function clamp(value) {
-    return Math.max(0, Math.min(255, Number(value) || 0));
-  }
-
-  async function uploadBin(file, family) {
-    const body = new FormData();
-    body.append("file", file);
-    if (family) body.append("chip_family", family);
-    try {
-      await api("/api/firmware/bins", { method: "POST", body });
-      toast("Firmware stored");
-      if (state.route.name === "firmware") await load(false);
-    } catch (error) {
-      toast(error.message);
-    }
-  }
-
-  function startRepeat(button) {
-    const fire = () => {
-      repeated = true;
-      if (button.dataset.action === "bri-step") {
-        const range = document.getElementById("bri-range");
-        if (!range) return;
-        range.value = String(Math.max(0, Math.min(255, Number(range.value) + Number(button.dataset.dir) * 15)));
-        range.dispatchEvent(new Event("input", { bubbles: true }));
-        range.dispatchEvent(new Event("change", { bubbles: true }));
-      } else if (button.dataset.action === "look-nudge") {
-        nudgeLook(button.dataset.key, Number(button.dataset.dir));
-        if (button.dataset.key === "bri") queueBrightness();
-      } else if (button.dataset.action === "nudge") {
-        nudgeEdit(button.dataset.group, button.dataset.id, button.dataset.field, Number(button.dataset.dir));
-      } else if (button.dataset.action === "color-step") {
-        state.draftColor[button.dataset.key] = clamp(state.draftColor[button.dataset.key] + Number(button.dataset.dir) * 5);
-        render();
-      }
-    };
-    fire();
-    repeat = setInterval(fire, 90);
-  }
-
-  root.addEventListener("click", (event) => {
-    const repeatButton = event.target.closest("[data-repeat]");
-    if (repeatButton) {
-      if (repeated) {
-        repeated = false;
+    handle.addEventListener("pointermove", (event) => {
+      if (start && Math.abs(event.clientY - start.y) > 8) clearTimeout(handle._long);
+      if (start && start.y - event.clientY > 30) { start = null; openSheet("rest"); }
+    });
+    handle.addEventListener("pointerup", (event) => {
+      clearTimeout(handle._long);
+      if (!start) return;
+      const moved = Math.abs(event.clientY - start.y);
+      const onLabel = start.onLabel;
+      start = null;
+      if (moved > 8) return;
+      if (onLabel && S.selection.size > 1) {
+        selectionMenu();
         return;
       }
-      if (repeatButton.dataset.action === "bri-step") {
-        const range = document.getElementById("bri-range");
-        if (range) {
-          range.value = String(Math.max(0, Math.min(255, Number(range.value) + Number(repeatButton.dataset.dir) * 15)));
-          range.dispatchEvent(new Event("input", { bubbles: true }));
-          range.dispatchEvent(new Event("change", { bubbles: true }));
-        }
-      } else if (repeatButton.dataset.action === "look-nudge") {
-        nudgeLook(repeatButton.dataset.key, Number(repeatButton.dataset.dir));
-        if (repeatButton.dataset.key === "bri") queueBrightness();
-      } else if (repeatButton.dataset.action === "nudge") {
-        nudgeEdit(repeatButton.dataset.group, repeatButton.dataset.id, repeatButton.dataset.field, Number(repeatButton.dataset.dir));
-      } else if (repeatButton.dataset.action === "color-step") {
-        state.draftColor[repeatButton.dataset.key] = clamp(Number(state.draftColor[repeatButton.dataset.key]) + Number(repeatButton.dataset.dir) * 5);
-        render();
-      }
-      return;
-    }
-    onClick(event);
-  });
-  root.addEventListener("change", onChange);
-  root.addEventListener("input", onInput);
-  root.addEventListener("pointerdown", (event) => {
-    const bright = event.target.closest("#look-range, [data-key='bri']");
-    if (bright && !state.holdingUndo) {
-      rememberUndo();
-      state.holdingUndo = true;
-    }
-    const button = event.target.closest("[data-repeat]");
-    if (!button || button.disabled) return;
-    event.preventDefault();
-    repeated = false;
-    startRepeat(button);
-  });
-  window.addEventListener("pointerup", () => {
-    clearInterval(repeat);
-    repeat = 0;
-    state.holdingUndo = false;
-  });
-  window.addEventListener("pointercancel", () => { clearInterval(repeat); repeat = 0; });
-  window.addEventListener("hashchange", () => {
-    const pane = visiblePane();
-    if (pane) rememberScroll(pane);
-    state.edits = null;
-    const route = parseRoute();
-    clearRouteState(route);
-    state.route = route;
-    state.booting = false;
-    persistUi();
-    render();
-    load(false, { paintEarly: false });
-  });
-  root.addEventListener("scroll", (event) => {
-    const pane = event.target && event.target.closest ? event.target.closest(".pane") : null;
-    if (!pane || pane.hidden) return;
-    state.scrolls[pane.dataset.scrollKey || scrollKey()] = pane.scrollTop;
-    persistUi();
-  }, true);
-  root.addEventListener("focusout", (event) => {
-    const input = event.target;
-    if (!input || !input.classList || !input.classList.contains("rename-input")) return;
-    commitRename(input.dataset.mac, input.value, input.dataset.cancel === "1");
-  });
-  root.addEventListener("keydown", (event) => {
-    const input = event.target;
-    if (!input || !input.classList || !input.classList.contains("rename-input")) return;
-    if (event.key === "Enter") {
-      event.preventDefault();
-      input.blur();
-    } else if (event.key === "Escape") {
-      input.dataset.cancel = "1";
-      input.blur();
-    }
-  });
-  document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
-  window.addEventListener("beforeinstallprompt", (event) => {
-    event.preventDefault();
-    state.installEvent = event;
-    if (canRepaint()) render();
-  });
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
+      openSheet("rest");
+    });
+  })();
 
-  async function boot() {
-    state.route = parseRoute();
-    if (!state.booting) render();
-    try {
-      state.session = await api("/api/session");
-    } catch (error) {
-      state.session = { required: false, ok: true };
+  function selectionMenu() {
+    const label = selectionLabel();
+    const isZone = (S.home.zones || []).some((zone) => zone.name === label);
+    const items = [{ label: "Paint", strong: true, action: () => openSheet("rest") }];
+    if (!isZone) {
+      items.push({
+        label: "Save as Zone",
+        action: async () => {
+          const name = await ask("Name this zone", "", "Front of house");
+          if (name) api("/api/zones", { method: "POST", body: { name, light_ids: [...S.selection] } }).catch((error) => toast(error.message));
+        },
+      });
     }
-    const saved = sessionStorage.getItem("fleet-job");
-    await load(true);
-    if (saved && state.session.ok) {
-      try { await watchJob(await api("/api/jobs/" + saved)); await load(false); } catch (error) { sessionStorage.removeItem("fleet-job"); }
-    }
-    const tick = async () => {
-      if (!document.hidden) {
-        if (state.route.name === "control") await refreshControl(false);
-        else await refresh();
-      }
-      const wait = state.route.name === "control" ? 800 : (state.job ? 1000 : 5000);
-      timer = setTimeout(tick, wait);
-    };
-    timer = setTimeout(tick, 5000);
+    items.push({ label: "Save as Favorite", action: saveFavoriteFlow });
+    items.push({ label: "Clear selection", action: clearSelection });
+    menu({ title: label, items });
   }
 
-  let touchX = null;
-  root.addEventListener("touchstart", (event) => {
-    if (event.touches.length !== 1) return;
-    touchX = event.touches[0].clientX;
-  }, { passive: true });
-  root.addEventListener("touchend", (event) => {
-    if (touchX == null || touchX > 24) { touchX = null; return; }
-    const end = event.changedTouches[0].clientX;
-    if (end - touchX > 80 && ["device", "backup", "diff"].includes(state.route.name)) history.back();
-    touchX = null;
+  // ----- Paint sheet -------------------------------------------------------
+
+  const sheet = $("#sheet");
+  let sheetDrag = null;
+  let trayReady = false;
+
+  function sheetOffset(state) {
+    const h = sheet.getBoundingClientRect().height || window.innerHeight * 0.9;
+    if (state === "full") return 0;
+    if (state === "rest") return Math.max(0, h - window.innerHeight * 0.6);
+    return h + 30;
+  }
+
+  function openSheet(state, instant) {
+    if (!S.selection.size) return;
+    const wasClosed = S.sheet === "closed";
+    S.sheet = state;
+    document.body.classList.add("painting");
+    sheet.classList.toggle("full", state === "full");
+    sheet.setAttribute("aria-hidden", "false");
+    if (instant) sheet.classList.add("dragging");
+    sheet.classList.remove("closing");
+    sheet.style.transform = `translateY(${sheetOffset(state)}px)`;
+    if (instant) requestAnimationFrame(() => sheet.classList.remove("dragging"));
+    if (wasClosed) {
+      renderSheet();
+      haptic("light");
+    }
+    renderHandle();
+    sendVisible();
+    saveView();
+  }
+
+  function closeSheet() {
+    S.sheet = "closed";
+    document.body.classList.remove("painting");
+    sheet.classList.add("closing");
+    sheet.style.transform = `translateY(${sheetOffset("closed")}px)`;
+    sheet.setAttribute("aria-hidden", "true");
+    setBandMode(false);
+    renderHandle();
+    sendVisible();
+    saveView();
+  }
+
+  $("#scrim").addEventListener("click", closeSheet);
+
+  for (const zone of [$("#sheet-grab"), $("#sel-head")]) {
+    zone.addEventListener("pointerdown", (event) => {
+      if (event.target.closest("#sel-all")) return;
+      sheetDrag = { y: event.clientY, base: sheetOffset(S.sheet), t: Date.now(), moved: false };
+      zone.setPointerCapture(event.pointerId);
+      sheet.classList.add("dragging");
+    });
+    zone.addEventListener("pointermove", (event) => {
+      if (!sheetDrag) return;
+      const dy = event.clientY - sheetDrag.y;
+      if (Math.abs(dy) > 6) sheetDrag.moved = true;
+      sheet.style.transform = `translateY(${Math.max(-8, sheetDrag.base + dy)}px)`;
+    });
+    zone.addEventListener("pointerup", (event) => {
+      if (!sheetDrag) return;
+      const dy = event.clientY - sheetDrag.y;
+      const velocity = dy / Math.max(1, Date.now() - sheetDrag.t);
+      const moved = sheetDrag.moved;
+      sheetDrag = null;
+      sheet.classList.remove("dragging");
+      if (!moved) {
+        if (event.target.closest("#sel-stack")) closeSheet();
+        else sheet.style.transform = `translateY(${sheetOffset(S.sheet)}px)`;
+        return;
+      }
+      const position = sheetOffset(S.sheet) + dy;
+      if (velocity > 0.6 || position > sheetOffset("rest") + 110) closeSheet();
+      else if (velocity < -0.4 || position < sheetOffset("rest") / 2) openSheet("full");
+      else openSheet("rest");
+    });
+  }
+
+  $("#sel-all").addEventListener("click", () => {
+    S.selection = new Set(S.lights.keys());
+    S.multi = false;
+    refreshChrome();
+    renderSheetHeader();
+    saveView();
+  });
+
+  function renderSheet() {
+    renderSheetHeader();
+    renderTray();
+    updateDials();
+    renderMore();
+  }
+
+  function renderSheetHeader() {
+    const ids = [...S.selection];
+    const stack = el("div", { class: "sel-ribbons" });
+    for (const id of ids.slice(0, 3)) {
+      const canvas = el("canvas");
+      canvas._light = id;
+      stack.append(canvas);
+    }
+    const label = selectionLabel();
+    const sub = ids.length > 3 ? `+${ids.length - 3} more` : ids.length > 1 ? `${ids.length} lights` : zoneName(S.lights.get(ids[0])?.zone_id) || "";
+    $("#sel-stack").replaceChildren(stack, el("div", { style: "min-width:0" }, el("div", { class: "sel-name", text: label }), el("div", { class: "sel-sub", text: sub })));
+    $("#sel-all").hidden = ids.length === S.lights.size;
+  }
+
+  // Look tray ------------------------------------------------------------------
+
+  const tray = $("#tray");
+  let trayItems = [];
+  let centered = -1;
+  let trayTouch = false;
+  let trayProgrammatic = false;
+  let settleTimer = 0;
+  let previewTimer = 0;
+  let lastPreviewAt = 0;
+  let pendingPreview = null;
+  let scrubUndo = null;
+  let committedKey = "";
+
+  function currentLookId() {
+    const ids = [...S.selection];
+    const first = S.lights.get(ids[0]);
+    if (!first) return null;
+    return ids.every((id) => S.lights.get(id)?.look_id === first.look_id) ? first.look_id : null;
+  }
+
+  function renderTray() {
+    const looks = S.home.looks || [];
+    trayItems = [{ id: "solid", name: "Solid", body: { fx: "Solid", col: [[255, 172, 92], [0, 0, 0], [0, 0, 0]] } }, ...looks];
+    tray.replaceChildren(
+      ...trayItems.map((look, index) => {
+        const canvas = el("canvas");
+        canvas._look = look.body;
+        canvas._solid = look.id === "solid";
+        const node = el("button", { class: "swatch", "data-index": index }, canvas, el("span", { text: look.name }));
+        node.addEventListener("click", () => {
+          if (index === centered) {
+            if (look.id === "solid") setBandMode(true);
+            else commitLook(look);
+            return;
+          }
+          trayTouch = false;
+          scrollToIndex(index, true);
+          setTimeout(() => (look.id === "solid" ? setBandMode(true) : commitLook(look)), 260);
+        });
+        return node;
+      }),
+    );
+    const lookId = currentLookId();
+    const first = selected()[0];
+    let index = lookId != null ? trayItems.findIndex((item) => item.id === lookId) : -1;
+    if (index < 0 && first && String(first.fx).toLowerCase() === "solid") index = 0;
+    if (index < 0) index = 0;
+    trayReady = false;
+    requestAnimationFrame(() => {
+      scrollToIndex(index, false);
+      centered = index;
+      markCentered(index);
+      committedKey = keyFor(trayItems[index]);
+      trayReady = true;
+    });
+    updateTrayNote();
+  }
+
+  function keyFor(look) {
+    return look ? `${look.id}` : "";
+  }
+
+  function scrollToIndex(index, smooth) {
+    const node = tray.children[index];
+    if (!node) return;
+    trayProgrammatic = true;
+    const left = node.offsetLeft - (tray.clientWidth - node.offsetWidth) / 2;
+    tray.scrollTo({ left, behavior: smooth ? "smooth" : "auto" });
+    setTimeout(() => { trayProgrammatic = false; }, smooth ? 450 : 60);
+  }
+
+  function markCentered(index) {
+    for (const node of tray.children) node.classList.toggle("center", Number(node.dataset.index) === index);
+  }
+
+  function centerIndex() {
+    const middle = tray.scrollLeft + tray.clientWidth / 2;
+    let best = 0;
+    let bestDistance = Infinity;
+    for (const node of tray.children) {
+      const distance = Math.abs(node.offsetLeft + node.offsetWidth / 2 - middle);
+      if (distance < bestDistance) { bestDistance = distance; best = Number(node.dataset.index); }
+    }
+    return best;
+  }
+
+  tray.addEventListener("pointerdown", () => { trayTouch = true; });
+  tray.addEventListener("touchstart", () => { trayTouch = true; }, { passive: true });
+  const trayRelease = () => {
+    trayTouch = false;
+    scheduleSettle();
+  };
+  tray.addEventListener("pointerup", trayRelease);
+  tray.addEventListener("touchend", trayRelease, { passive: true });
+  tray.addEventListener("pointercancel", () => { /* native scroll took over; touchend still fires */ });
+
+  tray.addEventListener("scroll", () => {
+    if (!trayReady) return;
+    const index = centerIndex();
+    if (index !== centered) {
+      centered = index;
+      markCentered(index);
+      if (!trayProgrammatic) {
+        haptic("light");
+        const look = trayItems[index];
+        if (look && look.id !== "solid") queuePreview(look);
+      }
+    }
+    if (!trayProgrammatic) scheduleSettle();
   }, { passive: true });
 
-  requestAnimationFrame(visuals);
-  boot();
+  function scheduleSettle() {
+    clearTimeout(settleTimer);
+    settleTimer = setTimeout(() => {
+      if (trayTouch || trayProgrammatic) return;
+      const look = trayItems[centered];
+      if (!look) return;
+      if (keyFor(look) === committedKey) {
+        if (scrubUndo) restoreAfterScrub();
+        return;
+      }
+      if (look.id === "solid") {
+        restoreAfterScrub();
+        return;
+      }
+      commitLook(look);
+    }, 160);
+  }
+
+  // While scrolling, the centered Look is shown on the real lights, throttled.
+  function queuePreview(look) {
+    const lights = selected();
+    if (!lights.length) return;
+    if (!scrubUndo) scrubUndo = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+    pendingPreview = look;
+    predict(lights.map((l) => l.id), { look: look.body }, { kind: "fade", dur: 120, hold: 1500 });
+    const gap = lights.length > MANY ? PREVIEW_MANY_MS : PREVIEW_MS;
+    const wait = Math.max(0, lastPreviewAt + gap - Date.now());
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(flushPreview, wait);
+    updateTrayNote(true);
+  }
+
+  function flushPreview() {
+    const look = pendingPreview;
+    pendingPreview = null;
+    if (!look) return;
+    lastPreviewAt = Date.now();
+    const ids = [...S.selection];
+    send({ t: "apply", seq: ++S.seq, preview: true, tt: 0, changes: ids.map((id) => ({ light: id, look_id: look.id })) });
+  }
+
+  function restoreAfterScrub() {
+    // Scrubbed and came back to where we started: put the previous look back.
+    const undoState = scrubUndo;
+    scrubUndo = null;
+    clearTimeout(previewTimer);
+    pendingPreview = null;
+    updateTrayNote(false);
+    if (!undoState) return;
+    send({ t: "apply", seq: ++S.seq, preview: false, tt: COMMIT_TT, changes: undoState.map((item) => ({ light: item.light, look: item.look })) }, { queue: true });
+    predict(undoState.map((item) => item.light), {}, { kind: "fade", dur: 200 });
+    for (const item of undoState) predictions.get(item.light) && (predictions.get(item.light).look = item.look);
+  }
+
+  function updateTrayNote(scrubbing) {
+    const count = S.selection.size;
+    $("#tray-note").textContent = scrubbing && count > MANY ? `previewing ${count} lights` : "";
+  }
+
+  function commitLook(look) {
+    clearTimeout(previewTimer);
+    pendingPreview = null;
+    const lights = selected();
+    if (!lights.length) return;
+    const undoState = scrubUndo || lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+    scrubUndo = null;
+    committedKey = keyFor(look);
+    updateTrayNote(false);
+    for (const light of lights) light.look_id = look.id;
+    commit(lights.map((l) => ({ light: l.id, look_id: look.id })), {
+      label: `${selectionLabel()} → ${look.name}`,
+      kind: "look",
+      look: look.body,
+      undo: undoState,
+    });
+  }
+
+  function markMissing(ids) {
+    const names = ids.map((id) => S.lights.get(id)?.name).filter(Boolean);
+    if (names.length) toast(`${names.join(", ")} used a stand-in effect · Update firmware in Maintenance`);
+  }
+
+  // Solid color band ---------------------------------------------------------
+
+  const band = $("#band");
+  let bandSlot = 0;
+  let bandUndo = null;
+  let bandLastSent = 0;
+
+  function setBandMode(on, slot = 0) {
+    bandSlot = slot;
+    $("#tray-wrap").hidden = on;
+    $("#band-wrap").hidden = !on;
+    if (on) {
+      drawBand();
+      const first = selected()[0];
+      if (first && first.col && first.col[slot]) placeKnobFor(first.col[slot]);
+    }
+    updateDials();
+  }
+
+  function kelvin(k) {
+    const t = k / 100;
+    let r, g, b;
+    if (t <= 66) { r = 255; g = 99.47 * Math.log(t) - 161.12; b = t <= 19 ? 0 : 138.52 * Math.log(t - 10) - 305.04; }
+    else { r = 329.7 * Math.pow(t - 60, -0.1332); g = 288.12 * Math.pow(t - 60, -0.0755); b = 255; }
+    return [clamp(r, 0, 255) | 0, clamp(g, 0, 255) | 0, clamp(b, 0, 255) | 0];
+  }
+
+  function hsv(h, s) {
+    const out = [0, 0, 0];
+    const i = Math.floor(h * 6);
+    const f = h * 6 - i;
+    const p = 1 - s, q = 1 - f * s, t = 1 - (1 - f) * s;
+    const table = [[1, t, p], [q, 1, p], [p, 1, t], [p, q, 1], [t, p, 1], [1, p, q]][((i % 6) + 6) % 6];
+    for (let c = 0; c < 3; c++) out[c] = Math.round(table[c] * 255);
+    return out;
+  }
+
+  function bandColor(x) {
+    const sat = Number($("#sat").value) / 100;
+    if (x < 0.5) {
+      const rgb = kelvin(2000 + (x / 0.5) * 4800);
+      const y = 255;
+      return rgb.map((c) => Math.round(y + (c - y) * sat));
+    }
+    return hsv((x - 0.5) / 0.5, sat);
+  }
+
+  function drawBand() {
+    const ctx = band.getContext("2d");
+    const [w, h] = sizeCanvas(null, band);
+    const grad = ctx.createLinearGradient(0, 0, w, 0);
+    for (let i = 0; i <= 48; i++) {
+      const x = i / 48;
+      const [r, g, b] = bandColor(Math.min(0.999, x));
+      grad.addColorStop(x, `rgb(${r},${g},${b})`);
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    const shade = ctx.createLinearGradient(0, 0, 0, h);
+    shade.addColorStop(0, "rgba(0,0,0,0)");
+    shade.addColorStop(1, "rgba(0,0,0,0.25)");
+    ctx.fillStyle = shade;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  function placeKnob(x) {
+    const rect = band.getBoundingClientRect();
+    $("#band-knob").style.left = `${16 + clamp(x, 0, 1) * rect.width}px`;
+  }
+
+  function placeKnobFor(color) {
+    let best = 0;
+    let bestDistance = Infinity;
+    for (let i = 0; i <= 200; i++) {
+      const x = Math.min(0.999, i / 200);
+      const c = bandColor(x);
+      const d = Math.abs(c[0] - color[0]) + Math.abs(c[1] - color[1]) + Math.abs(c[2] - color[2]);
+      if (d < bestDistance) { bestDistance = d; best = x; }
+    }
+    band._x = best;
+    placeKnob(best);
+  }
+
+  function bandLook(light, color) {
+    const col = (light.col || [[0, 0, 0], [0, 0, 0], [0, 0, 0]]).map((c) => [...c]);
+    col[bandSlot] = color;
+    if (bandSlot === 0) return { fx: "Solid", pal: "Default", col, sx: light.sx, ix: light.ix };
+    return { ...lightLook(light), col };
+  }
+
+  function bandAt(event, final) {
+    const rect = band.getBoundingClientRect();
+    const x = clamp((event.clientX - rect.left) / rect.width, 0, 0.999);
+    band._x = x;
+    placeKnob(x);
+    const color = bandColor(x);
+    const lights = selected();
+    if (!bandUndo) bandUndo = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+    const changes = lights.map((l) => ({ light: l.id, look: bandLook(l, color) }));
+    for (const change of changes) predictions.delete(change.light);
+    predict(lights.map((l) => l.id), { look: changes[0].look }, { kind: "fade", dur: 60, hold: 900 });
+    for (const change of changes) {
+      const p = predictions.get(change.light);
+      if (p) p.look = change.look;
+    }
+    if (final) {
+      const undoState = bandUndo;
+      bandUndo = null;
+      for (const l of lights) Object.assign(l, changes.find((c) => c.light === l.id).look, { look_id: null });
+      commit(changes, { label: `${selectionLabel()} → color`, kind: "color", undo: undoState, noPredict: true });
+      return;
+    }
+    if (Date.now() - bandLastSent > 90) {
+      bandLastSent = Date.now();
+      send({ t: "apply", seq: ++S.seq, preview: true, tt: 0, changes });
+    }
+  }
+
+  band.addEventListener("pointerdown", (event) => {
+    band.setPointerCapture(event.pointerId);
+    band._down = true;
+    bandAt(event, false);
+  });
+  band.addEventListener("pointermove", (event) => { if (band._down) bandAt(event, false); });
+  band.addEventListener("pointerup", (event) => { if (!band._down) return; band._down = false; bandAt(event, true); });
+  band.addEventListener("pointercancel", () => { band._down = false; });
+  $("#sat").addEventListener("input", () => { drawBand(); });
+  $("#sat").addEventListener("change", () => {
+    if (band._x == null) return;
+    const rect = band.getBoundingClientRect();
+    bandAt({ clientX: rect.left + band._x * rect.width }, true);
+  });
+  $("#band-back").addEventListener("click", () => setBandMode(false));
+
+  // Dials ----------------------------------------------------------------------
+
+  const dials = {};
+  for (const node of document.querySelectorAll(".dial")) {
+    const key = node.dataset.dial;
+    const track = $(".track", node);
+    const shade = key === "bri" ? el("div", { class: "shade" }) : null;
+    if (shade) track.insertBefore(shade, $(".thumb", track));
+    dials[key] = { node, track, fill: $(".fill", node), thumb: $(".thumb", node), value: $("[data-value]", node), shade, canvas: $(".track-ribbon", node) };
+    bindDial(key);
+  }
+
+  function dialValue(key) {
+    const lights = selected();
+    if (!lights.length) return 0;
+    if (key === "bri") {
+      const lit = lights.filter((l) => l.on);
+      return lit.length ? lit.reduce((sum, l) => sum + l.bri, 0) / lit.length : 0;
+    }
+    return lights.reduce((sum, l) => sum + (l[key] ?? 128), 0) / lights.length;
+  }
+
+  function setDialVisual(key, value) {
+    const dial = dials[key];
+    const x = clamp(value / 255, 0, 1);
+    dial.thumb.style.left = `${x * 100}%`;
+    if (dial.shade) dial.shade.style.left = `${x * 100}%`;
+    else dial.fill.style.width = `${x * 100}%`;
+    dial.value.textContent = key === "bri" ? `${pct(value)}%` : `${pct(value)}`;
+  }
+
+  function updateDials() {
+    if (dials.bri.dragging || dials.sx.dragging || dials.ix.dragging) return;
+    for (const key of Object.keys(dials)) setDialVisual(key, dialValue(key));
+    const first = selected()[0];
+    if (first) {
+      for (const node of document.querySelectorAll("#palettes .mini")) node.classList.toggle("on", node.textContent === first.pal);
+      for (const node of document.querySelectorAll("#effects .mini")) node.classList.toggle("on", node.textContent === first.fx);
+    }
+    const solid = selected().every((l) => String(l.fx).toLowerCase() === "solid");
+    dials.ix.node.hidden = solid;
+    dials.sx.node.hidden = solid;
+  }
+
+  function bindDial(key) {
+    const dial = dials[key];
+    let undoState = null;
+    let lastSent = 0;
+    let lastValue = 0;
+    const at = (event, final) => {
+      const rect = dial.track.getBoundingClientRect();
+      const value = Math.round(clamp((event.clientX - rect.left) / rect.width, 0, 1) * 255);
+      if ((value === 0 || value === 255) && value !== lastValue) haptic("medium");
+      lastValue = value;
+      setDialVisual(key, value);
+      const lights = selected();
+      if (!undoState) undoState = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+      let changes;
+      if (key === "bri") {
+        changes = lights.map((l) => (value > 0 ? { light: l.id, bri: value, on: true } : { light: l.id, on: false }));
+        for (const l of lights) {
+          l.on = value > 0;
+          if (value > 0) l.bri = value;
+          pushBri(l.id, l.on ? l.bri : 0);
+          refreshRibbon(l.id);
+        }
+      } else {
+        changes = lights.map((l) => ({ light: l.id, look: { ...lightLook(l), [key]: value } }));
+        for (const l of lights) l[key] = value;
+      }
+      if (final) {
+        const saved = undoState;
+        undoState = null;
+        const what = key === "bri" ? `${pct(value)}%` : `${key === "sx" ? "speed" : "intensity"} ${pct(value)}`;
+        commit(changes, { label: `${selectionLabel()} → ${what}`, kind: key, undo: saved, tt: key === "bri" ? 0 : 2, noPredict: true });
+        return;
+      }
+      if (Date.now() - lastSent > 100) {
+        lastSent = Date.now();
+        send({ t: "apply", seq: ++S.seq, preview: true, tt: 0, changes });
+      }
+      refreshChrome();
+    };
+    dial.track.addEventListener("pointerdown", (event) => {
+      dial.track.setPointerCapture(event.pointerId);
+      dial.dragging = true;
+      at(event, false);
+    });
+    dial.track.addEventListener("pointermove", (event) => { if (dial.dragging) at(event, false); });
+    dial.track.addEventListener("pointerup", (event) => {
+      if (!dial.dragging) return;
+      dial.dragging = false;
+      at(event, true);
+    });
+    dial.track.addEventListener("pointercancel", () => { dial.dragging = false; undoState = null; });
+  }
+
+  // More: palette, colors, effects, save ------------------------------------
+
+  function renderMore() {
+    const first = selected()[0];
+    if (!first) return;
+    const palettes = (S.home.palettes || []).filter((name) => name && !name.startsWith("~"));
+    $("#palettes").replaceChildren(
+      ...palettes.map((name) => {
+        const canvas = el("canvas");
+        canvas._palette = name;
+        const node = el("button", { class: "mini" + (first.pal === name ? " on" : "") }, canvas, el("span", { text: name }));
+        node.addEventListener("click", () => applyField("pal", name, `palette ${name}`));
+        return node;
+      }),
+    );
+    $("#dots").replaceChildren(
+      ...[0, 1, 2].map((slot) => {
+        const c = (first.col || [])[slot] || [0, 0, 0];
+        const dot = el("button", { class: "dot", style: `background: rgb(${c[0]},${c[1]},${c[2]})`, "aria-label": `Color ${slot + 1}` });
+        dot.addEventListener("click", () => { openSheet("rest"); setBandMode(true, slot); });
+        return dot;
+      }),
+    );
+    const effects = [...new Set((S.home.effects || []).filter((name) => name && name !== "RSVD" && name !== "-"))].sort((a, b) => a.localeCompare(b));
+    $("#effects").replaceChildren(
+      ...effects.map((name) => {
+        const canvas = el("canvas");
+        canvas._effect = name;
+        const node = el("button", { class: "mini" + (first.fx === name ? " on" : "") }, canvas, el("span", { text: name }));
+        node.addEventListener("click", () => applyField("fx", name, name));
+        return node;
+      }),
+    );
+    moreObserver.disconnect();
+    for (const canvas of document.querySelectorAll(".more canvas")) moreObserver.observe(canvas);
+  }
+
+  const moreVisible = new Set();
+  const moreObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (entry.isIntersecting) moreVisible.add(entry.target);
+      else moreVisible.delete(entry.target);
+    }
+  });
+
+  function applyField(field, value, what) {
+    const lights = selected();
+    const undoState = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+    const changes = lights.map((l) => ({ light: l.id, look: { ...lightLook(l), [field]: value } }));
+    for (const l of lights) { l[field] = value; l.look_id = null; }
+    commit(changes, { label: `${selectionLabel()} → ${what}`, kind: "look", look: changes[0].look, undo: undoState });
+    renderMore();
+  }
+
+  $("#save-look").addEventListener("click", async () => {
+    const first = selected()[0];
+    if (!first) return;
+    const name = await ask("Save as Look", "", "Porch warm");
+    if (!name) return;
+    try {
+      const look = await api("/api/looks", { method: "POST", body: { name, body: lightLook(first) } });
+      for (const l of selected()) l.look_id = look.id;
+      haptic("success");
+      toast(`Saved ${name}`);
+    } catch (error) { toast(error.message); }
+  });
+
+  $("#save-fav").addEventListener("click", saveFavoriteFlow);
+
+  async function saveFavoriteFlow() {
+    const lights = selected();
+    if (!lights.length) return;
+    const name = await ask("Save as Favorite", "Saves these lights with their look and brightness.", "Movie night");
+    if (!name) return;
+    const items = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+    try {
+      await api("/api/favorites", { method: "POST", body: { name, items } });
+      haptic("success");
+      toast(`Saved ${name}`);
+    } catch (error) { toast(error.message); }
+  }
+
+  function drawSheetCanvases(t) {
+    for (const canvas of document.querySelectorAll("#sel-stack canvas, #handle-swatches canvas")) {
+      const light = S.lights.get(canvas._light);
+      if (light && canvas.isConnected && canvas.offsetParent) drawMiniLight(canvas, light, t, false);
+    }
+    if (S.sheet === "closed") return;
+    const first = selected()[0];
+    if (first && dials.bri.canvas) drawMiniLight(dials.bri.canvas, first, t, true);
+    if (!$("#tray-wrap").hidden) {
+      const center = centered;
+      for (const node of tray.children) {
+        const index = Number(node.dataset.index);
+        if (Math.abs(index - center) > 3) continue;
+        const canvas = node.firstChild;
+        if (canvas._solid) drawSolidSwatch(canvas);
+        else drawLookSwatch(canvas, canvas._look, t, { points: 18 });
+      }
+    }
+    if (S.sheet === "full") {
+      for (const canvas of moreVisible) {
+        if (canvas._palette) {
+          drawLookSwatch(canvas, { fx: "Palette", pal: canvas._palette, col: first ? first.col : undefined, sx: 60 }, t, { points: 24, square: false });
+        } else if (canvas._effect) {
+          drawLookSwatch(canvas, { ...(first ? lightLook(first) : {}), fx: canvas._effect }, t, { points: 24, square: false });
+        }
+      }
+    }
+  }
+
+  function drawSolidSwatch(canvas) {
+    if (canvas._drawn) return;
+    const ctx = canvas.getContext("2d");
+    const [w, h] = sizeCanvas(null, canvas);
+    const grad = ctx.createLinearGradient(0, 0, w, 0);
+    for (let i = 0; i <= 12; i++) {
+      const [r, g, b] = bandColor(Math.min(0.999, i / 12));
+      grad.addColorStop(i / 12, `rgb(${r},${g},${b})`);
+    }
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+    canvas._drawn = true;
+  }
+
+  // ----- committing changes and undo -------------------------------------------
+
+  let lastUndo = null;
+  let pillTimer = 0;
+
+  // Optimistic: the screen changes now, the message goes out now, the server reconciles.
+  function commit(changes, { label, kind, look, undo: undoState, tt, noPredict, reverse } = {}) {
+    if (!changes.length) return;
+    const before = undoState || changes.map((c) => {
+      const l = S.lights.get(c.light);
+      return l ? { light: l.id, on: l.on, bri: l.bri, look: lightLook(l) } : null;
+    }).filter(Boolean);
+    for (const change of changes) {
+      const light = S.lights.get(change.light);
+      if (!light) continue;
+      if (!noPredict && (change.look_id != null || change.look)) {
+        const body = change.look || (S.home.looks || []).find((item) => item.id === change.look_id)?.body;
+        predict([light.id], { look: body }, { kind: "sweep", dir: reverse ? -1 : 1 });
+        if (body) Object.assign(light, { fx: body.fx, pal: body.pal || "Default", col: body.col || light.col, sx: body.sx ?? light.sx, ix: body.ix ?? light.ix });
+      }
+      if (change.on != null) light.on = change.on;
+      if (change.bri != null && change.bri > 0) { light.bri = change.bri; light.on = change.on !== false; }
+      if ((change.look_id != null || change.look) && change.on == null) light.on = true;
+      pushBri(light.id, light.on ? light.bri : 0);
+      refreshRibbon(light.id);
+    }
+    refreshChrome();
+    const message = { t: "apply", seq: ++S.seq, preview: false, changes };
+    if (tt != null) message.tt = tt;
+    else if (kind === "power") message.tt = changes.some((c) => c.on === false) ? 5 : 3;
+    else message.tt = COMMIT_TT;
+    if (!send(message, { queue: true })) toast("Will apply when the house is back");
+    if (!reverse) {
+      lastUndo = { changes: before, label };
+      showPill(label);
+    }
+  }
+
+  function undo() {
+    if (!lastUndo) return;
+    const { changes } = lastUndo;
+    lastUndo = null;
+    hidePill();
+    haptic("medium");
+    commit(changes.map((item) => ({ light: item.light, on: item.on, bri: item.on ? item.bri : undefined, look: item.look })), { reverse: true, kind: "undo" });
+    if (S.sheet !== "closed") { renderTray(); updateDials(); }
+  }
+
+  function showPill(label) {
+    const pill = $("#pill");
+    pill.replaceChildren(el("span", null, label || "Changed", " · "), el("b", { text: "Undo" }));
+    pill.onclick = undo;
+    pill.classList.add("show");
+    clearTimeout(pillTimer);
+    pillTimer = setTimeout(hidePill, 4000);
+  }
+
+  function toast(text) {
+    const pill = $("#pill");
+    pill.replaceChildren(el("span", { text }));
+    pill.onclick = hidePill;
+    pill.classList.add("show");
+    clearTimeout(pillTimer);
+    pillTimer = setTimeout(hidePill, 3000);
+  }
+
+  function hidePill() {
+    $("#pill").classList.remove("show");
+  }
+
+  async function applyFavorite(fav) {
+    const items = (fav.body.items || []).filter((item) => S.lights.has(item.light));
+    if (!items.length) return;
+    haptic("light");
+    const before = items.map((item) => {
+      const l = S.lights.get(item.light);
+      return { light: l.id, on: l.on, bri: l.bri, look: lightLook(l) };
+    });
+    commit(items.map((item) => ({ light: item.light, on: item.on, bri: item.bri, look: item.look })), { label: `${fav.name}`, kind: "favorite", undo: before });
+  }
+
+  function favoriteMenu(fav) {
+    menu({
+      title: fav.name,
+      items: [
+        { label: "Apply", strong: true, action: () => applyFavorite(fav) },
+        {
+          label: "Delete",
+          danger: true,
+          action: () => api(`/api/favorites/${fav.id}`, { method: "DELETE" }).catch((error) => toast(error.message)),
+        },
+      ],
+    });
+  }
+
+  function zoneMenu(zone) {
+    menu({
+      title: zone.name,
+      items: [
+        {
+          label: "Rename",
+          action: async () => {
+            const name = await ask("Rename zone", "", zone.name, zone.name);
+            if (name) api(`/api/zones/${zone.id}`, { method: "PATCH", body: { name } }).catch((error) => toast(error.message));
+          },
+        },
+        {
+          label: "Convert to Favorite",
+          action: async () => {
+            const lights = orderedLights(zone.id);
+            const name = await ask("Save as Favorite", "", zone.name, zone.name);
+            if (!name) return;
+            const items = lights.map((l) => ({ light: l.id, on: l.on, bri: l.bri, look: lightLook(l) }));
+            api("/api/favorites", { method: "POST", body: { name, items } }).then(() => { haptic("success"); toast(`Saved ${name}`); }).catch((error) => toast(error.message));
+          },
+        },
+        { label: "Delete zone", danger: true, action: () => api(`/api/zones/${zone.id}`, { method: "DELETE" }).catch((error) => toast(error.message)) },
+      ],
+    });
+  }
+
+  // ----- menus -------------------------------------------------------------------
+
+  function menu({ title, items, input }) {
+    return new Promise((resolve) => {
+      const layer = $("#menu");
+      const card = el("div", { class: "menu-card" });
+      if (title) card.append(el("div", { class: "menu-title", text: title }));
+      let field = null;
+      if (input) {
+        field = el("input", { class: "menu-input", value: input.value || "", placeholder: input.placeholder || "", maxlength: 40, enterkeyhint: "done" });
+        card.append(field);
+      }
+      const close = (value) => {
+        layer.hidden = true;
+        layer.replaceChildren();
+        resolve(value);
+      };
+      for (const item of items) {
+        card.append(
+          el("button", {
+            class: (item.danger ? "danger " : "") + (item.strong ? "strong" : ""),
+            text: item.label,
+            onclick: () => {
+              const value = field ? field.value.trim() : true;
+              close(value);
+              if (item.action) item.action(value);
+            },
+          }),
+        );
+      }
+      const cancel = el("button", { class: "menu-cancel", text: "Cancel", onclick: () => close(null) });
+      layer.replaceChildren(card, cancel);
+      layer.hidden = false;
+      layer.onclick = (event) => { if (event.target === layer) close(null); };
+      if (field) {
+        setTimeout(() => field.focus(), 50);
+        field.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") { event.preventDefault(); close(field.value.trim()); }
+        });
+      }
+    });
+  }
+
+  async function ask(title, _note, placeholder, value) {
+    const result = await menu({ title, input: { placeholder, value }, items: [{ label: "Save", strong: true }] });
+    return typeof result === "string" && result ? result : null;
+  }
+
+  function confirmAction(title, label) {
+    return menu({ title, items: [{ label, danger: true }] }).then((value) => value === true);
+  }
+
+  // ----- pushed screens ----------------------------------------------------------
+
+  const screen = $("#screen");
+
+  function pushScreen(state, build) {
+    if (S.sheet !== "closed") closeSheet();
+    S.screen = state;
+    screen.hidden = false;
+    screen.replaceChildren(...build());
+    requestAnimationFrame(() => screen.classList.add("in"));
+    renderHandle();
+    sendVisible();
+  }
+
+  function popScreen() {
+    const previous = S.screen;
+    if (previous && previous.kind === "find" && previous.held) api(`/api/boards/${previous.mac}/release`, { method: "POST" }).catch(() => {});
+    if (previous && previous.back) {
+      previous.back();
+      return;
+    }
+    S.screen = null;
+    screen.classList.remove("in");
+    setTimeout(() => { if (!S.screen) { screen.hidden = true; screen.replaceChildren(); } }, 330);
+    renderHandle();
+    sendVisible();
+  }
+
+  // Swipe from the left edge goes back.
+  (function bindEdgeSwipe() {
+    let start = null;
+    screen.addEventListener("touchstart", (event) => {
+      const touch = event.touches[0];
+      start = touch.clientX < 24 ? { x: touch.clientX, y: touch.clientY } : null;
+    }, { passive: true });
+    screen.addEventListener("touchend", (event) => {
+      if (!start) return;
+      const touch = event.changedTouches[0];
+      if (touch.clientX - start.x > 70 && Math.abs(touch.clientY - start.y) < 60) popScreen();
+      start = null;
+    }, { passive: true });
+  })();
+
+  function bar(label = "Lights") {
+    return el("header", { class: "bar" }, el("button", { class: "back", text: label, onclick: popScreen }));
+  }
+
+  // Maintenance -------------------------------------------------------------------
+
+  $("#status").addEventListener("click", () => openMaintenance());
+  bindPress($("#property"), { long: () => openMaintenance("boards") });
+
+  async function openMaintenance(focus) {
+    pushScreen({ kind: "maint" }, () => [bar(), el("h1", { text: "Maintenance" }), el("p", { class: "sub", text: "Loading…" })]);
+    await renderMaintenance(focus);
+  }
+
+  async function renderMaintenance(focus) {
+    let boards, devices, status, bins, settings;
+    try {
+      [boards, devices, status, bins, settings] = await Promise.all([
+        api("/api/boards"),
+        api("/api/devices"),
+        api("/api/status"),
+        api("/api/firmware/bins"),
+        api("/api/settings"),
+      ]);
+    } catch (error) {
+      screen.replaceChildren(bar(), el("h1", { text: "Maintenance" }), el("p", { class: "sub", text: error.message }));
+      return;
+    }
+    if (!S.screen || S.screen.kind !== "maint") return;
+    const byMac = new Map(devices.map((d) => [d.mac, d]));
+    const pending = (await api("/api/home").catch(() => ({ attention: {} }))).attention || {};
+    const parts = [bar(), el("h1", { text: "Maintenance" })];
+
+    const offline = boards.filter((b) => b.status === "adopted" && !b.online);
+    const fresh = boards.filter((b) => b.status === "new" && b.online);
+    const attention = [];
+    for (const board of offline) {
+      attention.push(
+        el("div", { class: "item" },
+          el("span", { class: "led" }),
+          el("div", { class: "grow" }, el("div", { class: "title", text: board.name }), el("div", { class: "meta", text: `Offline · last seen ${ago(board.last_seen)}` })),
+          el("button", { class: "act", text: "Retry", onclick: () => api("/api/scan", { method: "POST" }).then(() => toast("Looking for it…")) }),
+        ),
+      );
+    }
+    for (const board of fresh) {
+      attention.push(
+        el("div", { class: "item" },
+          el("span", { class: "led on" }),
+          el("div", { class: "grow" }, el("div", { class: "title", text: `New board · ${board.name}` }), el("div", { class: "meta", text: `${board.ip} · ${board.outputs.length || 1} output${board.outputs.length === 1 ? "" : "s"}` })),
+          el("button", { class: "act attn", text: "Set up", onclick: () => openFind(board.mac) }),
+        ),
+      );
+    }
+    const firmware = pending.firmware ? await firmwareRows() : [];
+    attention.push(...firmware);
+    if (attention.length) {
+      parts.push(el("h2", { class: "amber", text: "Needs attention" }), el("div", { class: "list" }, ...attention));
+    }
+
+    parts.push(el("h2", { text: "Boards", id: "boards" }));
+    parts.push(
+      el("div", { class: "list" },
+        ...boards.map((board) => {
+          const device = byMac.get(board.mac) || {};
+          const outputs = board.outputs.length || 1;
+          const more = el("button", { class: "act", text: "···", "aria-label": `More for ${board.name}` });
+          more.addEventListener("click", (event) => { event.stopPropagation(); boardMenu(board, device); });
+          return el("button", { class: "item", onclick: () => openFind(board.mac) },
+            el("span", { class: "led" + (board.online ? " on" : "") }),
+            el("div", { class: "grow" },
+              el("div", { class: "title", text: board.name }),
+              el("div", { class: "meta num", text: `${board.ip} · ${(board.arch || "").toUpperCase()} · ${board.version || "?"} · ${outputs} output${outputs === 1 ? "" : "s"}` }),
+            ),
+            more,
+          );
+        }),
+        boards.length ? null : el("div", { class: "item" }, el("div", { class: "meta", text: "No boards found yet. Rescan below, or add an address under Network." })),
+      ),
+    );
+
+    parts.push(el("h2", { text: "Firmware files" }));
+    const upload = el("input", { type: "file", accept: ".bin", hidden: true });
+    upload.addEventListener("change", async () => {
+      const file = upload.files[0];
+      if (!file) return;
+      const form = new FormData();
+      form.append("file", file);
+      try {
+        await api("/api/firmware/bins", { method: "POST", body: form });
+        toast(`Added ${file.name}`);
+        renderMaintenance();
+      } catch (error) { toast(error.message); }
+    });
+    parts.push(
+      el("div", { class: "list" },
+        ...bins.map((bin) =>
+          el("div", { class: "item" },
+            el("div", { class: "grow" }, el("div", { class: "title", text: bin.filename }), el("div", { class: "meta", text: `${bin.chip_family || "unknown chip"} · ${(bin.byte_size / 1024).toFixed(0)} KB` })),
+          ),
+        ),
+        el("button", { class: "item", onclick: () => upload.click() }, el("div", { class: "grow" }, el("div", { class: "title", text: "Upload a .bin" }))),
+        upload,
+      ),
+    );
+
+    parts.push(el("h2", { text: "Server" }));
+    const property = el("input", { value: S.home.property || "", placeholder: "Home name", maxlength: 40 });
+    const extra = el("input", { value: settings.extra_hosts || "", placeholder: "Extra hosts, e.g. 192.168.1.40" });
+    const subnets = el("input", { value: settings.scan_subnets || "", placeholder: "Subnets to sweep, e.g. 192.168.1.0/24" });
+    parts.push(
+      el("div", { class: "field" }, property, el("button", { class: "btn", text: "Save", onclick: () => api("/api/property", { method: "PUT", body: { name: property.value } }).then(() => toast("Saved")).catch((e) => toast(e.message)) })),
+      el("p", { class: "note", text: "Shown at the top of Home." }),
+      el("div", { class: "field", style: "margin-top:14px" }, extra),
+      el("div", { class: "field", style: "margin-top:8px" }, subnets, el("button", { class: "btn", text: "Save", onclick: () => api("/api/settings", { method: "PUT", body: { extra_hosts: extra.value, scan_subnets: subnets.value } }).then(() => toast("Saved")).catch((e) => toast(e.message)) })),
+      el("div", { class: "list", style: "margin-top:14px" },
+        el("div", { class: "item" }, el("div", { class: "grow" }, el("div", { class: "title", text: `Server ${status.version}` }), el("div", { class: "meta", text: `Last scan ${ago(status.scan && status.scan.at)} · ${(status.scan && status.scan.online) || 0} online` }))),
+        el("button", { class: "item", onclick: () => api("/api/scan", { method: "POST" }).then(() => toast("Scanning the network")) }, el("div", { class: "grow" }, el("div", { class: "title", text: "Rescan now" }))),
+        status.auth ? el("button", { class: "item", onclick: () => api("/api/logout", { method: "POST" }).then(() => location.reload()) }, el("div", { class: "grow" }, el("div", { class: "title", text: "Sign out" }))) : null,
+      ),
+    );
+    screen.replaceChildren(...parts);
+    if (focus === "boards") $("#boards", screen)?.scrollIntoView();
+  }
+
+  async function firmwareRows() {
+    const rows = [];
+    const list = await api("/api/firmware/pending").catch(() => []);
+    for (const item of list) {
+      const progress = el("div", { class: "progress", hidden: true }, el("div", { style: "width:0%" }));
+      rows.push(
+        el("div", { class: "item" },
+          el("div", { class: "grow" }, el("div", { class: "title", text: item.name }), el("div", { class: "meta num", text: `Firmware ${item.from} → ${item.to}` }), progress),
+          el("button", { class: "act attn", text: "Update", onclick: (event) => runFirmware([item], event.currentTarget) }),
+        ),
+      );
+    }
+    if (list.length > 1) {
+      rows.push(el("button", { class: "item", onclick: (event) => runFirmware(list, event.currentTarget) }, el("div", { class: "grow" }, el("div", { class: "title", text: "Update all, one at a time" }))));
+    }
+    return rows;
+  }
+
+  async function runFirmware(items, button) {
+    button.disabled = true;
+    for (const item of items) {
+      try {
+        const job = await api("/api/bulk/firmware", { method: "POST", body: { macs: [item.mac], bin_id: item.bin_id } });
+        await waitJob(job.id, (state) => { button.textContent = state.status === "running" ? `Updating ${item.name}…` : state.status; });
+      } catch (error) {
+        toast(error.message);
+        break;
+      }
+    }
+    button.disabled = false;
+    renderMaintenance();
+  }
+
+  async function waitJob(id, onTick) {
+    for (let i = 0; i < 400; i++) {
+      const job = await api(`/api/jobs/${id}`);
+      onTick && onTick(job);
+      if (job.status === "done" || job.status === "error") {
+        if (job.status === "error") throw new Error(job.error || "The update failed");
+        const failed = (job.results || []).find((row) => row.ok === false);
+        if (failed) throw new Error(failed.error || "The update failed");
+        return job;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error("Timed out");
+  }
+
+  function ago(iso) {
+    if (!iso) return "never";
+    const seconds = (Date.now() - Date.parse(iso)) / 1000;
+    if (seconds < 90) return "just now";
+    if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
+    if (seconds < 86400) return `${Math.round(seconds / 3600)} h ago`;
+    return `${Math.round(seconds / 86400)} d ago`;
+  }
+
+  function boardMenu(board, device) {
+    menu({
+      title: `${board.name} · ${board.ip}`,
+      items: [
+        {
+          label: "Rename board",
+          action: async () => {
+            const name = await ask("Rename board", "", board.name, board.name);
+            if (!name) return;
+            api(`/api/devices/${board.mac}/rename`, { method: "POST", body: { name } }).then(() => { toast("Renamed"); renderMaintenance(); }).catch((e) => toast(e.message));
+          },
+        },
+        { label: "Backups", action: () => openBackups(board) },
+        { label: "Back up now", action: () => api(`/api/devices/${board.mac}/backup`, { method: "POST" }).then(() => toast("Backed up")).catch((e) => toast(e.message)) },
+        { label: "Update firmware…", action: () => chooseFirmware(board) },
+        {
+          label: "Reboot",
+          action: async () => {
+            if (await confirmAction(`Reboot ${board.name}? Its lights go dark for a few seconds.`, "Reboot")) {
+              api(`/api/devices/${board.mac}/reboot`, { method: "POST" }).then(() => toast("Rebooting")).catch((e) => toast(e.message));
+            }
+          },
+        },
+        {
+          label: "Forget board",
+          danger: true,
+          action: async () => {
+            if (await confirmAction(`Forget ${board.name}? Its lights leave Home until it is set up again.`, "Forget")) {
+              api(`/api/devices/${board.mac}/forget`, { method: "POST", body: { on: true } }).then(() => renderMaintenance()).catch((e) => toast(e.message));
+            }
+          },
+        },
+      ].filter(Boolean),
+    });
+    void device;
+  }
+
+  async function chooseFirmware(board) {
+    try {
+      const [report] = await api("/api/firmware/check", { method: "POST", body: { macs: [board.mac] } });
+      const options = (report.bins || []).filter((bin) => bin.ok);
+      if (!options.length) {
+        toast("No compatible firmware file. Upload one under Firmware files.");
+        return;
+      }
+      menu({
+        title: `Firmware for ${board.name} (now ${board.version})`,
+        items: options.map((bin) => ({
+          label: bin.filename,
+          action: async () => {
+            if (!(await confirmAction(`Flash ${bin.filename}? A backup runs first.`, "Flash"))) return;
+            try {
+              const job = await api("/api/bulk/firmware", { method: "POST", body: { macs: [board.mac], bin_id: bin.id } });
+              toast("Updating…");
+              await waitJob(job.id);
+              toast(`${board.name} updated`);
+            } catch (error) { toast(error.message); }
+          },
+        })),
+      });
+    } catch (error) { toast(error.message); }
+  }
+
+  async function openBackups(board) {
+    const backTo = S.screen;
+    S.screen = { kind: "backups", mac: board.mac, back: () => { S.screen = backTo; renderMaintenance(); } };
+    screen.replaceChildren(bar("Maintenance"), el("h1", { text: board.name }), el("p", { class: "sub", text: "Loading backups…" }));
+    try {
+      const rows = await api(`/api/devices/${board.mac}/backups`);
+      screen.replaceChildren(
+        bar("Maintenance"),
+        el("h1", { text: board.name }),
+        el("p", { class: "sub", text: "Saved automatically when found, nightly, when its config changes, and before firmware updates." }),
+        el("h2", { text: "Backups" }),
+        el("div", { class: "list" },
+          ...rows.map((row) =>
+            el("button", { class: "item", onclick: () => backupMenu(board, row) },
+              el("div", { class: "grow" },
+                el("div", { class: "title num", text: new Date(row.created_at).toLocaleString() }),
+                el("div", { class: "meta", text: `${row.reason} · firmware ${row.version || "?"}` }),
+              ),
+              el("span", { class: "chev" }),
+            ),
+          ),
+          rows.length ? null : el("div", { class: "item" }, el("div", { class: "meta", text: "No backups yet." })),
+        ),
+      );
+    } catch (error) { toast(error.message); }
+  }
+
+  function backupMenu(board, row) {
+    menu({
+      title: new Date(row.created_at).toLocaleString(),
+      items: [
+        {
+          label: "Restore this backup",
+          danger: true,
+          action: async () => {
+            haptic("warning");
+            if (!(await confirmAction(`Restore ${board.name} to this backup? Its current config is saved first, then it reboots.`, "Restore"))) return;
+            try {
+              const job = await api(`/api/backups/${row.id}/restore`, { method: "POST" });
+              toast("Restoring…");
+              await waitJob(job.id);
+              toast("Restored");
+            } catch (error) { toast(error.message); }
+          },
+        },
+        { label: "Download", action: () => { location.href = `/api/backups/${row.id}/download`; } },
+      ],
+    });
+  }
+
+  // Find ----------------------------------------------------------------------------
+
+  async function openFind(mac) {
+    const backTo = S.screen && S.screen.kind === "maint" ? S.screen : null;
+    const state = { kind: "find", mac, held: false, picks: {}, back: backTo ? () => { releaseFind(); S.screen = backTo; renderMaintenance(); sendVisible(); } : null };
+    if (S.screen) {
+      S.screen = state;
+      screen.replaceChildren(bar(backTo ? "Maintenance" : "Lights"), el("p", { class: "sub", text: "Loading…" }));
+    } else {
+      pushScreen(state, () => [bar(), el("p", { class: "sub", text: "Loading…" })]);
+    }
+    sendVisible();
+    await renderFind();
+  }
+
+  function releaseFind() {
+    const state = S.screen;
+    if (state && state.kind === "find" && state.held) {
+      state.held = false;
+      api(`/api/boards/${state.mac}/release`, { method: "POST" }).catch(() => {});
+    }
+  }
+
+  async function renderFind() {
+    const state = S.screen;
+    if (!state || state.kind !== "find") return;
+    let boards;
+    try { boards = await api("/api/boards"); } catch (error) { toast(error.message); return; }
+    const board = boards.find((b) => b.mac === state.mac);
+    if (!board) { toast("That board is gone"); popScreen(); return; }
+    state.board = board;
+    state.total = Math.max(1, ...board.outputs.map((o) => o.stop), board.led_count || 1);
+    const flash = el("button", { class: "btn big" + (state.flashing ? " strobing" : ""), text: state.flashing ? "Stop flashing" : "Flash this board" });
+    flash.addEventListener("click", async () => {
+      haptic("medium");
+      try {
+        if (state.flashing) {
+          state.flashing = false;
+          state.held = false;
+          await api(`/api/boards/${board.mac}/release`, { method: "POST" });
+        } else {
+          state.flashing = true;
+          state.held = true;
+          await api(`/api/boards/${board.mac}/flash`, { method: "POST" });
+        }
+      } catch (error) { toast(error.message); }
+      renderFind();
+    });
+    const parts = [
+      bar(state.back ? "Maintenance" : "Lights"),
+      el("h1", { text: board.name }),
+      el("p", { class: "sub num", text: `${board.ip} · ${(board.arch || "").toUpperCase()} · WLED ${board.version || "?"}` }),
+      flash,
+    ];
+    const zones = S.home.zones || [];
+    board.outputs.forEach((output, index) => {
+      const len = Math.max(1, output.stop - output.start);
+      const pick = state.picks[output.seg] || { ticks: [] };
+      state.picks[output.seg] = pick;
+      const canvas = el("canvas");
+      canvas._output = output;
+      const ruler = el("div", { class: "ruler" });
+      // Ticks every 25 LEDs (labels at 50, major at 100); finer on short runs so they can still be counted.
+      const step = rulerStep(len);
+      const shade = el("div", { class: "span-shade", hidden: true });
+      ruler.append(shade);
+      for (let led = 0; led <= len; led += step) {
+        const label = led % (step * 2) === 0;
+        const tick = el("button", {
+          class: "tick" + (label ? " label" : "") + (led % (step * 4) === 0 && led ? " major" : "") + (pick.ticks.includes(led) ? " chosen" : ""),
+          style: `left:${(led / len) * 100}%`,
+          "aria-label": `LED ${led}`,
+        }, label ? el("span", { text: String(led) }) : null);
+        tick.addEventListener("click", () => pickTick(output, led, len));
+        ruler.append(tick);
+      }
+      const span = spanFor(pick, len);
+      if (span) {
+        shade.hidden = false;
+        shade.style.left = `${(span[0] / len) * 100}%`;
+        shade.style.width = `${((span[1] - span[0]) / len) * 100}%`;
+      }
+      const count = el("div", { class: "count num" }, span ? `${span[1] - span[0]}` : `${len}`, el("small", { text: span ? `LEDs ${span[0]}–${span[1]}` : "LEDs in this output" }));
+      const name = el("input", { class: "input", value: output.name || "", placeholder: "Name this light", maxlength: 40 });
+      output._name = name;
+      output._zone = output.zone_id;
+      const chips = el("div", { class: "zone-chips" });
+      const drawChips = () => {
+        chips.replaceChildren(
+          ...zones.map((zone) => {
+            const chip = el("button", { class: "chip" + (output._zone === zone.id ? " on" : ""), text: zone.name });
+            chip.addEventListener("click", () => { output._zone = output._zone === zone.id ? null : zone.id; drawChips(); });
+            return chip;
+          }),
+        );
+      };
+      drawChips();
+      parts.push(
+        el("div", { class: "output" },
+          el("div", { class: "output-head" }, el("span", { class: "title", text: `Output ${index + 1}` }), el("span", { class: "meta num", text: `LEDs ${output.start}–${output.stop}` })),
+          el("div", { class: "find-ribbon" }, canvas),
+          ruler,
+          count,
+          el("div", { class: "actions" },
+            el("button", { class: "btn", text: "Light only this output", onclick: () => solo(output) }),
+            span ? el("button", { class: "btn", text: `Set length to ${span[1]}`, onclick: () => setLength(output, span[1]) }) : null,
+            state.held ? el("button", { class: "btn", text: "Back to normal", onclick: () => restoreBoard() }) : null,
+          ),
+          el("div", { class: "name-field" }, name),
+          zones.length ? chips : null,
+        ),
+      );
+    });
+    parts.push(el("button", { class: "btn big solid", text: board.status === "adopted" ? "Save names" : "Add to Home", onclick: () => saveSetup(board) }));
+    screen.replaceChildren(...parts);
+  }
+
+  function rulerStep(len) {
+    return len >= 100 ? 25 : len >= 40 ? 10 : 5;
+  }
+
+  function spanFor(pick, len) {
+    if (!pick.ticks.length) return null;
+    const step = rulerStep(len);
+    if (pick.ticks.length === 1) return [pick.ticks[0], Math.min(len, pick.ticks[0] + step)];
+    const [a, b] = [...pick.ticks].sort((x, y) => x - y);
+    return a === b ? [a, Math.min(len, a + step)] : [a, b];
+  }
+
+  async function pickTick(output, led, len) {
+    const state = S.screen;
+    const pick = state.picks[output.seg];
+    if (pick.ticks.length >= 2) pick.ticks = [];
+    pick.ticks.push(led);
+    haptic("light");
+    const span = spanFor(pick, len);
+    state.flashing = false;
+    try {
+      await api(`/api/boards/${state.mac}/span`, { method: "POST", body: { seg: output.seg, start: span[0], stop: span[1] } });
+      state.held = true;
+    } catch (error) { toast(error.message); }
+    renderFind();
+  }
+
+  async function solo(output) {
+    const state = S.screen;
+    state.flashing = false;
+    try {
+      await api(`/api/boards/${state.mac}/solo`, { method: "POST", body: { seg: output.seg } });
+      state.held = true;
+      haptic("medium");
+    } catch (error) { toast(error.message); }
+    renderFind();
+  }
+
+  async function restoreBoard() {
+    const state = S.screen;
+    state.flashing = false;
+    state.held = false;
+    for (const key of Object.keys(state.picks)) state.picks[key].ticks = [];
+    try { await api(`/api/boards/${state.mac}/release`, { method: "POST" }); } catch (error) { toast(error.message); }
+    renderFind();
+  }
+
+  async function setLength(output, count) {
+    const state = S.screen;
+    if (!(await confirmAction(`Make output ${output.seg + 1} exactly ${count} LEDs long?`, "Set length"))) return;
+    try {
+      await api(`/api/boards/${state.mac}/length`, { method: "POST", body: { seg: output.seg, count } });
+      state.picks[output.seg].ticks = [];
+      toast(`Output is now ${count} LEDs`);
+    } catch (error) { toast(error.message); }
+    renderFind();
+  }
+
+  async function saveSetup(board) {
+    const outputs = board.outputs.map((output) => ({ seg: output.seg, name: output._name.value.trim(), zone_id: output._zone || null }));
+    if (!outputs.some((o) => o.name)) {
+      toast("Name at least one output");
+      return;
+    }
+    try {
+      releaseFind();
+      await api(`/api/boards/${board.mac}/setup`, { method: "POST", body: { outputs } });
+      haptic("success");
+      toast(board.status === "adopted" ? "Saved" : "Added to Home");
+      S.screen = null;
+      screen.classList.remove("in");
+      setTimeout(() => { if (!S.screen) { screen.hidden = true; screen.replaceChildren(); } }, 330);
+      renderHandle();
+      sendVisible();
+    } catch (error) { toast(error.message); }
+  }
+
+  function drawFind(t) {
+    const state = S.screen;
+    if (!boardFrame || boardFrame.mac !== state.mac || !state.total) return;
+    const data = boardFrame.data;
+    const points = data.length / 3;
+    for (const canvas of screen.querySelectorAll(".find-ribbon canvas")) {
+      const output = canvas._output;
+      if (!output) continue;
+      const a = Math.floor((output.start / state.total) * points);
+      const b = Math.max(a + 1, Math.ceil((output.stop / state.total) * points));
+      const slice = buffer(`f${output.seg}`, (b - a) * 3);
+      for (let i = 0; i < slice.length; i++) slice[i] = data[a * 3 + i] || 0;
+      const ctx = canvas._ctx || (canvas._ctx = canvas.getContext("2d"));
+      const [w, h] = sizeCanvas(null, canvas);
+      drawStrip(ctx, w, h, slice, t, { falloff: true });
+    }
+  }
+
+  // ----- login -------------------------------------------------------------------
+
+  function showLogin() {
+    if (S.screen && S.screen.kind === "login") return;
+    const input = el("input", { class: "input", type: "password", placeholder: "Password", autocomplete: "current-password" });
+    const go = async () => {
+      try {
+        await api("/api/login", { method: "POST", body: { password: input.value } });
+        location.reload();
+      } catch (error) { toast(error.message); }
+    };
+    input.addEventListener("keydown", (event) => { if (event.key === "Enter") go(); });
+    S.screen = { kind: "login" };
+    screen.hidden = false;
+    screen.classList.add("in");
+    screen.replaceChildren(el("div", { class: "login" }, el("h1", { text: "Lumen" }), input, el("button", { class: "btn solid", text: "Sign in", onclick: go })));
+    setTimeout(() => input.focus(), 50);
+  }
+
+  // ----- boot ----------------------------------------------------------------------
+
+  window.addEventListener("resize", () => {
+    if (S.sheet !== "closed") sheet.style.transform = `translateY(${sheetOffset(S.sheet)}px)`;
+    else sheet.style.transform = `translateY(${sheetOffset("closed")}px)`;
+    if (!$("#band-wrap").hidden) drawBand();
+  });
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "hidden") saveCache();
+    else if (!S.connected) connect();
+  });
+  window.addEventListener("pagehide", saveCache);
+  setInterval(saveCache, 15000);
+
+  window.Lumen = { S, frames, commit, undo, selectSet, openSheet, closeSheet, openMaintenance, openFind };
+
+  sheet.style.transform = `translateY(${sheetOffset("closed")}px)`;
+  loadCache();
+  renderHome();
+  renderStatus();
+  renderFavorites();
+  loadView();
+  requestAnimationFrame(frameLoop);
+  connect();
+
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
 })();

@@ -1,4 +1,6 @@
-# Demo stack: the fleet app plus two mock controllers, no LAN hardware required.
+# Demo stack: the app plus mock controllers, no LAN hardware required.
+# The porch and shelf boards each drive two outputs, so Home shows four Lights from two boards.
+# The unnamed "WLED" board shows up under Maintenance as new until you name it in Find.
 # docker compose -f docker-compose.demo.yml up --build
 
 services:
@@ -13,7 +15,7 @@ services:
       DATA_DIR: /data
       PUID: "568"
       PGID: "568"
-      EXTRA_HOSTS: "mock-shelf:9091"
+      EXTRA_HOSTS: "mock-shelf:9091,mock-new:9094"
       DISCOVERY_INTERVAL: "8"
       PRESENCE_INTERVAL: "5"
       BACKUP_WATCH_INTERVAL: "15"
@@ -25,6 +27,7 @@ services:
     depends_on:
       - mock-shelf
       - mock-porch
+      - mock-new
     healthcheck:
       test: ["CMD", "python", "-m", "app.healthcheck"]
       interval: 15s
@@ -47,6 +50,7 @@ services:
       MOCK_RELEASE: "Dig-Uno-V3"
       MOCK_VERSION: "16.0.1"
       MOCK_LEDS: "150"
+      MOCK_OUTPUTS: "Shelf top:75,Shelf bottom:75"
       MOCK_PEERS: "mock-porch:9092"
       MOCK_MDNS: "0"
       MOCK_RSSI: "-55"
@@ -74,6 +78,7 @@ services:
       MOCK_RELEASE: "ESP8266"
       MOCK_VERSION: "0.14.4"
       MOCK_LEDS: "60"
+      MOCK_OUTPUTS: "Porch rail:40,Porch ceiling:20"
       MOCK_MDNS: "0"
       MOCK_RSSI: "-72"
       PUID: "568"
@@ -84,6 +89,25 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  mock-new:
+    image: wled-fleet:local
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "mock.wled_mock"]
+    environment:
+      MOCK_HOST: 0.0.0.0
+      MOCK_PORT: "9094"
+      MOCK_MAC: "d4e5f6071829"
+      MOCK_NAME: "WLED"
+      MOCK_MDNS_NAME: "wled-a3f2"
+      MOCK_ARCH: "esp32"
+      MOCK_RELEASE: "ESP32"
+      MOCK_VERSION: "16.0.1"
+      MOCK_LEDS: "30"
+      MOCK_MDNS: "0"
+      PUID: "568"
+      PGID: "568"
 
 volumes:
   demo-data:

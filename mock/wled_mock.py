@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import colorsys
 import json
 import logging
@@ -12,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse, PlainTextResponse
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
@@ -20,8 +21,7 @@ log = logging.getLogger("wled-mock")
 
 SKIP_CFG_KEYS = {"pin", "v", "rb", "time", "tt"}
 
-EFFECTS = ["Solid", "Blink", "Breathe", "Wipe", "Rainbow", "Chase", "Theater", "Scanner"]
-PALETTES = ["Default", "Warm", "Ocean", "Rainbow", "Party", "Forest"]
+from mock.render import EFFECTS, PALETTES, render_state
 
 
 @dataclass
@@ -39,6 +39,8 @@ class MockSpec:
     ota_lock: bool = False
     reboot_seconds: float = 0.6
     rssi: int = -58
+    # Named runs on separate outputs, e.g. [("Porch rail", 40), ("Porch ceiling", 20)].
+    outputs: list[tuple[str, int]] = field(default_factory=list)
 
 
 class MockDevice:
@@ -49,6 +51,41 @@ class MockDevice:
         self.pin_ok = not spec.pin
         self.down_until = 0.0
         self.started = time.time()
+        runs = spec.outputs or [("", spec.leds)]
+        buses = []
+        segments = []
+        cursor = 0
+        palette = [[255, 160, 60], [255, 120, 40], [255, 200, 140], [255, 90, 30]]
+        for index, (label, length) in enumerate(runs):
+            buses.append(
+                {
+                    "start": cursor,
+                    "len": length,
+                    "pin": [(16 if spec.arch.startswith("esp32") else 2) + index],
+                    "order": 0,
+                    "rev": False,
+                    "skip": 0,
+                    "type": 22,
+                }
+            )
+            segment = {
+                "id": index,
+                "start": cursor,
+                "stop": cursor + length,
+                "len": length,
+                "on": True,
+                "bri": 255,
+                "rev": False,
+                "col": [palette[index % len(palette)], [40, 0, 0], [0, 0, 0]],
+                "fx": 0,
+                "pal": 0,
+                "sx": 128,
+                "ix": 128,
+            }
+            if label:
+                segment["n"] = label
+            segments.append(segment)
+            cursor += length
         self.cfg = {
             "rev": [1, 0],
             "id": {"mdns": spec.mdns, "name": spec.name, "inv": spec.name},
@@ -56,19 +93,9 @@ class MockDevice:
             "ap": {"ssid": "WLED-AP", "pskl": 8},
             "hw": {
                 "led": {
-                    "total": spec.leds,
+                    "total": cursor,
                     "maxpwr": 850,
-                    "ins": [
-                        {
-                            "start": 0,
-                            "len": spec.leds,
-                            "pin": [16 if spec.arch.startswith("esp32") else 2],
-                            "order": 0,
-                            "rev": False,
-                            "skip": 0,
-                            "type": 22,
-                        }
-                    ],
+                    "ins": buses,
                 }
             },
             "ota": {"lock": spec.ota_lock, "pskl": len(spec.ota_passphrase)},
@@ -83,25 +110,12 @@ class MockDevice:
             "bri": 128,
             "ps": -1,
             "transition": 7,
-            "seg": [
-                {
-                    "id": 0,
-                    "start": 0,
-                    "stop": spec.leds,
-                    "len": spec.leds,
-                    "on": True,
-                    "bri": 255,
-                    "rev": False,
-                    "col": [[255, 160, 60], [40, 0, 0], [0, 0, 0]],
-                    "fx": 0,
-                    "pal": 0,
-                    "sx": 128,
-                    "ix": 128,
-                }
-            ],
+            "seg": segments,
             "udpn": {"send": False, "recv": True},
         }
         self._lock = threading.Lock()
+        self.sockets: list = []
+        self.live_socket = None
 
     def reboot(self) -> None:
         self.down_until = time.monotonic() + self.spec.reboot_seconds
@@ -175,9 +189,21 @@ class MockDevice:
                 if key != "id":
                     target[key] = value
 
+    def total(self) -> int:
+        return int(self.cfg["hw"]["led"].get("total") or self.spec.leds)
+
+    def pixels(self) -> list[list[int]]:
+        return render_state(self.state, self.total(), time.time())
+
     def live_colors(self) -> list[list[int]]:
-        count = max(12, min(36, int(self.spec.leds / 4) or 12))
-        return render_live(self.state, count, time.time())
+        """What /json/live returns: every LED, or every n-th LED past the build's limit."""
+        pixels = self.pixels()
+        limit = 1024 if self.spec.arch.startswith("esp32") else 256
+        step = max(1, -(-len(pixels) // limit))
+        return pixels[::step]
+
+    def max_sockets(self) -> int:
+        return 8 if self.spec.arch.startswith("esp32") else 3
 
     def apply_cfg(self, payload: dict) -> None:
         ota = payload.get("ota") if isinstance(payload.get("ota"), dict) else None
@@ -199,7 +225,7 @@ class MockDevice:
         if total <= 0:
             total = int(self.cfg["hw"]["led"].get("total") or 1)
         self.cfg["hw"]["led"]["total"] = total
-        if self.state["seg"]:
+        if len(self.state["seg"]) == 1:
             self.state["seg"][0]["stop"] = total
             self.state["seg"][0]["len"] = total
 
@@ -229,43 +255,15 @@ class MockDevice:
 
 
 def render_live(state: dict, count: int, now: float) -> list[list[int]]:
-    """Downsampled LED colors for /json/live. Effects move with time and speed."""
+    """Colors for a strip of `count` LEDs, one segment spanning all of it unless given."""
     segments = state.get("seg") if isinstance(state.get("seg"), list) else []
-    segment = segments[0] if segments and isinstance(segments[0], dict) else {}
-    colors = segment.get("col") if isinstance(segment.get("col"), list) else []
-    primary = colors[0] if colors and isinstance(colors[0], list) else [255, 160, 60]
-    secondary = colors[1] if len(colors) > 1 and isinstance(colors[1], list) else [0, 0, 0]
-    primary = [int(primary[i]) if i < len(primary) else 0 for i in range(3)]
-    secondary = [int(secondary[i]) if i < len(secondary) else 0 for i in range(3)]
-    fx = int(segment.get("fx") or 0)
-    speed = int(segment.get("sx") or 128)
-    level = int(state.get("bri") or 0) if state.get("on") else 0
-    clock = now * (0.35 + speed / 160)
-    pixels: list[list[int]] = []
-    width = max(1, count)
-    for index in range(width):
-        phase = index / width
-        if fx == 1:
-            mix = 1.0 if int(clock * 2) % 2 == 0 else 0.08
-            rgb = [int(channel * mix) for channel in primary]
-        elif fx == 2:
-            mix = 0.25 + 0.75 * (0.5 + 0.5 * _wave(clock * 2))
-            rgb = [int(channel * mix) for channel in primary]
-        elif fx == 3:
-            head = (clock * 0.35) % 1
-            mix = max(0.0, 1 - abs(phase - head) * width / 3)
-            rgb = [int(primary[channel] * mix + secondary[channel] * (1 - mix)) for channel in range(3)]
-        elif fx == 4:
-            rgb = _hue(phase + clock * 0.2)
-        elif fx in {5, 7}:
-            head = int(clock * 4) % width
-            rgb = primary if index == head else secondary
-        elif fx == 6:
-            rgb = primary if (index + int(clock * 3)) % 3 else secondary
-        else:
-            rgb = list(primary)
-        pixels.append([max(0, min(255, int(channel * level / 255))) for channel in rgb])
-    return pixels
+    patched = dict(state)
+    patched["seg"] = [
+        {**segment, "start": segment.get("start", 0), "stop": segment.get("stop", count)}
+        for segment in segments
+        if isinstance(segment, dict)
+    ]
+    return render_state(patched, count, now)
 
 
 def _wave(value: float) -> float:
@@ -320,7 +318,69 @@ def build_app(device: MockDevice) -> FastAPI:
     @app.get("/json/live")
     async def live() -> dict:
         colors = device.live_colors()
-        return {"leds": colors, "n": len(colors)}
+        step = max(1, -(-device.total() // max(1, len(colors))))
+        return {"leds": ["%02X%02X%02X" % tuple(color) for color in colors], "n": step}
+
+    async def broadcast() -> None:
+        message = {"state": device.state, "info": device.info()}
+        for socket in list(device.sockets):
+            try:
+                await socket.send_json(message)
+            except Exception:
+                if socket in device.sockets:
+                    device.sockets.remove(socket)
+
+    async def stream_live(socket: WebSocket) -> None:
+        interval = 0.04 if device.spec.arch.startswith("esp32") else 0.08
+        while device.live_socket is socket:
+            colors = device.live_colors()
+            frame = bytearray(b"L\x01")
+            for color in colors:
+                frame.extend(bytes(color))
+            try:
+                await socket.send_bytes(bytes(frame))
+            except Exception:
+                return
+            await asyncio.sleep(interval)
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        device.sockets.append(socket)
+        while len(device.sockets) > device.max_sockets():
+            oldest = device.sockets.pop(0)
+            if device.live_socket is oldest:
+                device.live_socket = None
+            try:
+                await oldest.close()
+            except Exception:
+                pass
+        await socket.send_json({"state": device.state, "info": device.info()})
+        try:
+            while True:
+                payload = await socket.receive_json()
+                if not isinstance(payload, dict):
+                    continue
+                if "lv" in payload:
+                    if payload["lv"]:
+                        device.live_socket = socket
+                        asyncio.create_task(stream_live(socket))
+                    elif device.live_socket is socket:
+                        device.live_socket = None
+                    continue
+                if not device.authorized(payload):
+                    continue
+                device.apply_state(payload)
+                if payload.get("v"):
+                    await socket.send_json({"state": device.state, "info": device.info()})
+                await broadcast()
+        except (WebSocketDisconnect, RuntimeError, ValueError):
+            pass
+        finally:
+            if socket in device.sockets:
+                device.sockets.remove(socket)
+            if device.live_socket is socket:
+                device.live_socket = None
 
     @app.get("/json/state")
     async def get_state() -> dict:
@@ -332,6 +392,7 @@ def build_app(device: MockDevice) -> FastAPI:
         if not device.authorized(payload):
             return JSONResponse({"error": "denied"}, status_code=401)
         device.apply_state(payload)
+        await broadcast()
         if payload.get("v"):
             return {"success": True, "state": device.state}
         return {"success": True}
@@ -431,7 +492,22 @@ def spec_from_env() -> MockSpec:
         ota_lock=os.environ.get("MOCK_OTA_LOCK", "").lower() in {"1", "true", "yes"},
         reboot_seconds=float(os.environ.get("MOCK_REBOOT_SECONDS", "0.8")),
         rssi=int(os.environ.get("MOCK_RSSI", "-58")),
+        outputs=parse_outputs(os.environ.get("MOCK_OUTPUTS", "")),
     )
+
+
+def parse_outputs(text: str) -> list[tuple[str, int]]:
+    """MOCK_OUTPUTS="Porch rail:40,Porch ceiling:20" gives one output and segment per run."""
+    runs: list[tuple[str, int]] = []
+    for item in text.split(","):
+        if ":" not in item:
+            continue
+        label, _, length = item.rpartition(":")
+        try:
+            runs.append((label.strip(), max(1, int(length))))
+        except ValueError:
+            continue
+    return runs
 
 
 def advertise(spec: MockSpec, port: int):
