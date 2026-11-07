@@ -1,8 +1,11 @@
-const CACHE = "wled-fleet-4";
+const CACHE = "lumen-1";
 const SHELL = [
   "/",
   "/static/styles.css",
-  "/static/app.js",
+  "/static/lumen/boot.js",
+  "/static/lumen/main.js",
+  "/static/lumen/effects.js",
+  "/static/lumen/ribbon.js",
   "/manifest.webmanifest",
   "/static/favicon.svg",
   "/static/icons/icon-192.png",

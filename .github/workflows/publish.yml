@@ -2,7 +2,7 @@ name: Publish image
 
 on:
   push:
-    branches: [main]
+    branches: [main, lumen]
 
 permissions:
   contents: read
@@ -35,9 +35,10 @@ jobs:
         with:
           images: ghcr.io/dylanl321/wled-fleet
           tags: |
-            type=raw,value=latest
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=sha,format=long
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' }}
+            type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref_name == 'main' }}
+            type=sha,format=long,enable=${{ github.ref_name == 'main' }}
+            type=raw,value=lumen,enable=${{ github.ref_name == 'lumen' }}
 
       - uses: docker/build-push-action@v6
         with:

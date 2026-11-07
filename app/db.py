@@ -113,6 +113,43 @@ CREATE TABLE IF NOT EXISTS scenes (
   look_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS zones (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lights (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  mac TEXT NOT NULL,
+  segment_id INTEGER NOT NULL,
+  output_index INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  zone_id INTEGER,
+  position INTEGER NOT NULL DEFAULT 0,
+  named INTEGER NOT NULL DEFAULT 0,
+  start INTEGER NOT NULL DEFAULT 0,
+  stop INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  UNIQUE (mac, output_index)
+);
+
+CREATE TABLE IF NOT EXISTS looks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  effect TEXT NOT NULL,
+  fallback TEXT NOT NULL,
+  palette TEXT NOT NULL,
+  colors_json TEXT NOT NULL,
+  sx INTEGER NOT NULL,
+  ix INTEGER NOT NULL,
+  builtin INTEGER NOT NULL DEFAULT 0,
+  use_count INTEGER NOT NULL DEFAULT 0,
+  position INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
 """
 
 
@@ -134,6 +171,15 @@ class Database:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def backup_to(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            dest = sqlite3.connect(path)
+            try:
+                self._conn.backup(dest)
+            finally:
+                dest.close()
 
     def _all(self, sql: str, params: tuple = ()) -> list[dict]:
         with self._lock:
@@ -542,3 +588,155 @@ class Database:
 
     def delete_scene(self, scene_id: int) -> None:
         self._run("DELETE FROM scenes WHERE id=?", (scene_id,))
+
+    def list_zones(self) -> list[dict]:
+        return self._all("SELECT * FROM zones ORDER BY position, id")
+
+    def get_zone(self, zone_id: int) -> dict | None:
+        return self._one("SELECT * FROM zones WHERE id=?", (zone_id,))
+
+    def create_zone(self, name: str, position: int | None = None) -> dict:
+        if position is None:
+            row = self._one("SELECT COALESCE(MAX(position), -1) AS n FROM zones")
+            position = int(row["n"] if row else -1) + 1
+        zone_id = self._run(
+            "INSERT INTO zones (name, position, created_at) VALUES (?, ?, ?)",
+            (name, position, utcnow()),
+        )
+        created = self.get_zone(zone_id)
+        assert created is not None
+        return created
+
+    def rename_zone(self, zone_id: int, name: str) -> None:
+        self._run("UPDATE zones SET name=? WHERE id=?", (name, zone_id))
+
+    def set_zone_positions(self, pairs: list[tuple[int, int]]) -> None:
+        with self._lock:
+            for zone_id, position in pairs:
+                self._conn.execute("UPDATE zones SET position=? WHERE id=?", (position, zone_id))
+            self._conn.commit()
+
+    def delete_zone(self, zone_id: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE lights SET zone_id=NULL WHERE zone_id=?", (zone_id,))
+            self._conn.execute("DELETE FROM zones WHERE id=?", (zone_id,))
+            self._conn.commit()
+
+    def list_lights(self) -> list[dict]:
+        rows = self._all("SELECT * FROM lights ORDER BY position, id")
+        for row in rows:
+            row["named"] = bool(row["named"])
+        return rows
+
+    def get_light(self, light_id: int) -> dict | None:
+        row = self._one("SELECT * FROM lights WHERE id=?", (light_id,))
+        if row is not None:
+            row["named"] = bool(row["named"])
+        return row
+
+    def lights_for_mac(self, mac: str) -> list[dict]:
+        return [light for light in self.list_lights() if light["mac"] == mac]
+
+    def insert_light(self, row: dict) -> dict:
+        light_id = self._run(
+            """
+            INSERT INTO lights (
+              mac, segment_id, output_index, name, zone_id, position, named, start, stop, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["mac"],
+                int(row["segment_id"]),
+                int(row["output_index"]),
+                row["name"],
+                row.get("zone_id"),
+                int(row.get("position") or 0),
+                1 if row.get("named") else 0,
+                int(row.get("start") or 0),
+                int(row.get("stop") or 1),
+                utcnow(),
+            ),
+        )
+        created = self.get_light(light_id)
+        assert created is not None
+        return created
+
+    def update_light(self, light_id: int, fields: dict) -> dict | None:
+        allowed = {"name", "zone_id", "position", "named", "start", "stop", "segment_id", "output_index"}
+        sets = []
+        values: list[object] = []
+        for key, value in fields.items():
+            if key not in allowed:
+                continue
+            if key == "named":
+                value = 1 if value else 0
+            sets.append(f"{key}=?")
+            values.append(value)
+        if not sets:
+            return self.get_light(light_id)
+        values.append(light_id)
+        self._run(f"UPDATE lights SET {', '.join(sets)} WHERE id=?", tuple(values))
+        return self.get_light(light_id)
+
+    def delete_light(self, light_id: int) -> None:
+        self._run("DELETE FROM lights WHERE id=?", (light_id,))
+
+    def set_light_order(self, rows: list[dict]) -> None:
+        with self._lock:
+            for row in rows:
+                self._conn.execute(
+                    "UPDATE lights SET zone_id=?, position=? WHERE id=?",
+                    (row.get("zone_id"), int(row.get("position") or 0), int(row["id"])),
+                )
+            self._conn.commit()
+
+    def list_looks(self) -> list[dict]:
+        rows = self._all("SELECT * FROM looks ORDER BY position, id")
+        for row in rows:
+            row["builtin"] = bool(row["builtin"])
+            try:
+                row["colors"] = json.loads(row["colors_json"])
+            except json.JSONDecodeError:
+                row["colors"] = [[255, 214, 170], [0, 0, 0], [0, 0, 0]]
+        return rows
+
+    def get_look(self, look_id: int) -> dict | None:
+        for look in self.list_looks():
+            if look["id"] == look_id:
+                return look
+        return None
+
+    def insert_look(self, row: dict) -> dict:
+        look_id = self._run(
+            """
+            INSERT INTO looks (
+              name, effect, fallback, palette, colors_json, sx, ix, builtin, use_count, position, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["name"],
+                row["effect"],
+                row["fallback"],
+                row["palette"],
+                json.dumps(row["colors"], separators=(",", ":")),
+                int(row.get("sx") or 0),
+                int(row.get("ix") or 0),
+                1 if row.get("builtin") else 0,
+                int(row.get("use_count") or 0),
+                int(row.get("position") or 0),
+                utcnow(),
+            ),
+        )
+        created = self.get_look(look_id)
+        assert created is not None
+        return created
+
+    def touch_look(self, look_id: int) -> None:
+        self._run("UPDATE looks SET use_count=use_count+1 WHERE id=?", (look_id,))
+
+    def delete_empty_zones(self) -> None:
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM zones WHERE id NOT IN (SELECT DISTINCT zone_id FROM lights WHERE zone_id IS NOT NULL)"
+            )
+            self._conn.commit()

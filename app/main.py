@@ -21,6 +21,7 @@ from app.diffutil import json_diff, mask_secrets
 from app.discovery import normalize_mac
 from app.errors import FleetError
 from app.fleet import Fleet
+from app.lumen import Lumen, mount_lumen
 from app.util import clean_name
 from app.schemas import (
     ApplyIn,
@@ -140,12 +141,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             follow_redirects=False,
         )
         fleet = Fleet(db, settings, http)
+        lumen = Lumen(fleet)
         app.state.db = db
         app.state.http = http
         app.state.fleet = fleet
+        app.state.lumen = lumen
         app.state.session_secret = load_secret(settings.data_dir / "session.key")
         app.state.login_failures = {}
-        tasks = [asyncio.create_task(fleet.run_jobs())]
+        tasks = [asyncio.create_task(fleet.run_jobs()), asyncio.create_task(lumen.run())]
         if settings.scheduler_enabled:
             tasks.append(asyncio.create_task(fleet.run_maintenance()))
             log.info("WLED Fleet %s listening for controllers", settings.app_version)
@@ -153,6 +156,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             fleet.stop()
+            lumen.stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -657,6 +661,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         results = await apply_look(fleet, _macs(request, macs), scene["look"], body.sync)
         return {"results": results}
 
+    mount_lumen(app)
     if (STATIC).exists():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

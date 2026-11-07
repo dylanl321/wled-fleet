@@ -116,6 +116,7 @@ class Fleet:
         self._control_again = False
         self._section_holds: dict[str, dict] = {}
         self._section_seq = 0
+        self.after_scan = None
 
     def lock(self, mac: str) -> asyncio.Lock:
         if mac not in self._locks:
@@ -333,6 +334,8 @@ class Fleet:
                 self.db.set_error(mac, str(exc))
                 self.event("error", "backup.failed", str(exc), mac)
         self.last_scan = {"at": utcnow(), "mdns": self.mdns.ready, **summary}
+        if self.after_scan is not None:
+            await self.after_scan()
         return summary
 
     async def _scan_once(self, full: bool) -> dict:
