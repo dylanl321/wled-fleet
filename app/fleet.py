@@ -109,6 +109,13 @@ class Fleet:
         self._jobs: asyncio.Queue[tuple[Job, Callable[[Job], Awaitable[None]]]] = asyncio.Queue()
         self._negative_until: dict[str, float] = {}
         self._release_cache: dict[str, tuple[float, list]] = {}
+        self._board_cache: dict[str, dict] = {}
+        self._control_meta: dict = {"effects": [], "palettes": [], "presets": []}
+        self._control_gen = 0
+        self._control_task: asyncio.Task | None = None
+        self._control_again = False
+        self._section_holds: dict[str, dict] = {}
+        self._section_seq = 0
 
     def lock(self, mac: str) -> asyncio.Lock:
         if mac not in self._locks:
@@ -687,9 +694,10 @@ class Fleet:
             self.event("info", "device.leds", f"Updated LED outputs on {device['name']}", mac)
             return self.public_device(self._require(mac))
 
-    async def identify(self, mac: str) -> None:
+    async def identify(self, mac: str, seconds: float = 3.0) -> None:
         device = self._require(mac)
-        await self.wled.identify(device)
+        async with self.lock(mac):
+            await self.wled.identify(device, seconds=seconds)
         self.event("info", "device.identify", f"Flashed {device['name']}", mac)
 
     async def reboot_device(self, mac: str) -> dict:

@@ -15,7 +15,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth import issue_session, password_ok, session_valid
 from app.config import Settings
-from app.control import apply_look, set_sync, snapshot
+from app.control import apply_look, cached_view, restore_sections, schedule_control_refresh, set_sync, start_sections
 from app.db import Database
 from app.diffutil import json_diff, mask_secrets
 from app.discovery import normalize_mac
@@ -41,6 +41,7 @@ from app.schemas import (
     RenameIn,
     SceneApplyIn,
     SceneIn,
+    SectionsIn,
     SecretsIn,
     SyncIn,
     SegmentsIn,
@@ -524,12 +525,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/control")
     async def control(request: Request, group: int | None = None) -> dict:
-        return await snapshot(fleet_of(request), group)
+        fleet = fleet_of(request)
+        view = cached_view(fleet, group)
+        schedule_control_refresh(fleet)
+        return view
 
     @app.post("/api/control/apply")
     async def control_apply(body: ApplyIn, request: Request) -> dict:
         macs = _macs(request, body.macs)
         results = await apply_look(fleet_of(request), macs, body.look.model_dump(exclude_none=True), body.sync)
+        return {"results": results}
+
+    @app.post("/api/control/sections")
+    async def control_sections(body: SectionsIn, request: Request) -> dict:
+        return await start_sections(fleet_of(request), _macs(request, body.macs), body.every)
+
+    @app.post("/api/control/sections/restore")
+    async def control_sections_restore(body: MacsIn, request: Request) -> dict:
+        results = await restore_sections(fleet_of(request), _macs(request, body.macs))
         return {"results": results}
 
     @app.get("/api/groups")

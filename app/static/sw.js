@@ -1,4 +1,4 @@
-const CACHE = "wled-fleet-2";
+const CACHE = "wled-fleet-3";
 const SHELL = [
   "/",
   "/static/styles.css",

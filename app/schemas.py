@@ -128,6 +128,11 @@ class ApplyIn(BaseModel):
     sync: bool = False
 
 
+class SectionsIn(BaseModel):
+    macs: list[str] = Field(min_length=1, max_length=100)
+    every: int = Field(ge=1, le=1000)
+
+
 class GroupIn(BaseModel):
     name: str = Field(min_length=1, max_length=32)
 

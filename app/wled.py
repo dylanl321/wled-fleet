@@ -8,6 +8,7 @@ import httpx
 
 from app.discovery import is_wled_info, parse_node_targets
 from app.errors import WledError
+from app.sections import replay_state
 from app.util import base_url
 
 log = logging.getLogger(__name__)
@@ -183,30 +184,34 @@ class WledClient:
                 raise
         return await self.wait_ready(device)
 
-    async def identify(self, device: dict) -> None:
-        current = await self.post_json(device, "/json/state", {"v": True})
+    async def identify(self, device: dict, seconds: float = 3.0) -> None:
+        current = await self.post_json(device, "/json/state", {"v": True, "tt": 0})
         state = current.get("state") if isinstance(current.get("state"), dict) else current
-        restore: dict = {"tt": 0}
-        if isinstance(state, dict):
-            for key in ("on", "bri"):
-                if key in state:
-                    restore[key] = state[key]
-            if isinstance(state.get("seg"), list):
-                restore["seg"] = state["seg"]
+        saved = state if isinstance(state, dict) else {}
+        segments = saved.get("seg") if isinstance(saved.get("seg"), list) else []
+        ids: list[int] = []
+        for index, segment in enumerate(segments):
+            if isinstance(segment, dict):
+                seg_id = segment.get("id")
+                ids.append(seg_id if isinstance(seg_id, int) else index)
+        if not ids:
+            ids = [0]
+        flash = [
+            {
+                "id": seg_id,
+                "fx": 1,
+                "sx": 255,
+                "frz": False,
+                "col": [[255, 255, 255], [0, 0, 0], [0, 0, 0]],
+            }
+            for seg_id in ids
+        ]
         try:
-            await self.post_state(
-                device,
-                {
-                    "on": True,
-                    "bri": 255,
-                    "tt": 0,
-                    "seg": [{"id": 0, "fx": 1, "sx": 255, "col": [[255, 180, 60]]}],
-                },
-            )
-            await asyncio.sleep(2.5)
+            await self.post_state(device, {"on": True, "bri": 255, "tt": 0, "seg": flash})
+            await asyncio.sleep(max(0.0, seconds))
         finally:
             try:
-                await self.post_state(device, restore)
+                await self.post_state(device, replay_state(saved))
             except WledError:
                 log.warning("could not restore %s after identify", device.get("ip"))
 

@@ -49,10 +49,40 @@
     booting: true,
     repo: "",
     installEvent: null,
+    renaming: "",
+    pickMac: "",
+    pickAt: 0,
+    justSelected: "",
+    flashUntil: {},
+    sections: null,
+    sectionTimer: 0,
+    lastLook: "",
   };
+  hydrateUi();
+  if (state.control || state.devices.length) state.booting = false;
   let timer = 0;
   let repeat = 0;
   let repeated = false;
+
+  function hydrateUi() {
+    try {
+      const data = JSON.parse(localStorage.getItem("wled-fleet-ui") || "null");
+      if (!data || typeof data !== "object") return;
+      if (Array.isArray(data.devices)) state.devices = data.devices;
+      if (data.control && typeof data.control === "object") state.control = data.control;
+      if ("groupId" in data) state.groupId = data.groupId;
+    } catch (error) { /* private mode or an old value */ }
+  }
+
+  function persistUi() {
+    try {
+      localStorage.setItem("wled-fleet-ui", JSON.stringify({
+        devices: state.devices,
+        control: state.control,
+        groupId: state.groupId,
+      }));
+    } catch (error) { /* private mode */ }
+  }
 
   function esc(value) {
     return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
@@ -266,7 +296,7 @@
   }
 
   function body() {
-    if (state.booting) return '<p class="boot">Loading controllers…</p>';
+    if (state.booting && !state.control && !state.devices.length) return '<p class="boot"></p>';
     if (state.error) return '<p class="error">' + esc(state.error) + '</p><button class="btn" type="button" data-action="refresh">Try again</button>';
     const views = {
       control: viewControl,
@@ -325,25 +355,53 @@
 
   function viewControl() {
     const data = state.control;
-    if (!data) return '<p class="boot">Reading the boards…</p>';
+    if (!data) return '<div class="groups"><span class="chip on">All</span></div><article class="strip"></article><article class="strip"></article>';
     const groups = data.groups || [];
     const chips = '<button type="button" class="chip' + (state.groupId == null ? " on" : "") + '" data-action="use-group" data-id="">All</button>' +
       groups.map((group) => '<button type="button" class="chip' + (Number(state.groupId) === group.id ? " on" : "") + '" data-action="use-group" data-id="' + group.id + '">' + esc(group.name) + "</button>").join("") +
-      '<button type="button" class="chip" data-action="new-group">+</button>';
+      '<button type="button" class="chip" data-action="new-group" aria-label="New group">+</button>';
     const boards = (data.devices || []).map((device) => stripCard(device)).join("");
-    return '<div class="groups">' + chips + "</div>" +
+    return '<div class="groups">' + chips + "</div>" + legendHtml() +
       (boards || '<section class="card"><h2>No boards yet</h2><p class="meta">They show up here on their own once they join the network.</p></section>');
+  }
+
+  function nameField(device, where) {
+    if (state.renaming === device.mac) {
+      return '<input class="rename-input" data-mac="' + esc(device.mac) + '" data-where="' + where + '" maxlength="32" value="' + esc(device.name) + '" aria-label="Controller name">';
+    }
+    return '<button type="button" class="namebtn" data-action="rename-start" data-mac="' + esc(device.mac) + '">' + esc(device.name) + "</button>";
   }
 
   function stripCard(device) {
     const skipped = state.skipped[device.mac] ? " skipped" : "";
     const mark = state.applyMarks[device.mac];
     const markHtml = mark && !mark.ok ? '<span class="pill bad">' + esc(mark.error) + "</span>" : "";
+    const anySkipped = Object.keys(state.skipped).length > 0;
+    const included = !state.skipped[device.mac];
+    const tick = included && (anySkipped || state.justSelected === device.mac)
+      ? '<span class="tick' + (state.justSelected === device.mac ? " pop" : "") + '" aria-hidden="true">✓</span>'
+      : "";
+    const status = device.online ? (state.skipped[device.mac] ? "Left out" : (device.on ? "On" : "Off")) : "Offline";
     return '<article class="strip' + skipped + (device.online ? "" : " off") + '" data-action="pick-board" data-mac="' + esc(device.mac) + '">' +
       '<div class="strip-head"><span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' +
-      (device.online ? (state.skipped[device.mac] ? "Left out" : (device.on ? "On" : "Off")) : "Offline") + "</span><strong>" + esc(device.name) + "</strong>" + markHtml + "</div>" +
-      '<canvas data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + '"></canvas>' +
+      status + "</span>" + tick + nameField(device, "control") + markHtml +
+      '<button type="button" class="flash" data-action="flash" data-mac="' + esc(device.mac) + '"' + (device.online ? "" : " disabled") + ' aria-label="Flash ' + esc(device.name) + '">Flash</button></div>' +
+      '<canvas data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + ' colors"></canvas>' +
       '<p class="meta" data-meta="' + compact(device.mac) + '">' + esc(device.effect || "") + "</p></article>";
+  }
+
+  function legendHtml() {
+    const sections = state.sections;
+    if (!sections) return "";
+    if (sections.pending) return '<p class="legend">Marking every ' + Number(sections.every) + " LEDs…</p>";
+    return (sections.devices || []).map((device) => {
+      const rows = (device.outputs || []).map((output) => {
+        const pin = output.pin == null ? "" : " · pin " + output.pin;
+        return '<li><i style="background:' + cssColor(output.color) + '"></i><span>Output ' + output.output + pin + " · " + output.leds + " LEDs</span></li>";
+      }).join("");
+      return '<section class="legend"><div class="legend-head"><strong>' + esc(device.name) + '</strong><button type="button" class="btn tiny" data-action="sections-done">Done</button></div><ul>' +
+        rows + '</ul><p class="meta">Every ' + Number(sections.every) + " LEDs. Restores on its own.</p></section>";
+    }).join("");
   }
 
   function controlDock() {
@@ -351,19 +409,22 @@
       '<button type="button" class="look" data-action="play-scene" data-id="' + scene.id + '"><span>' + esc(scene.name) + "</span></button>"
     ).join("");
     const looks = LOOKS.map((look) =>
-      '<button type="button" class="look" data-action="quick-look" data-name="' + esc(look.name) + '"><i style="background:' + cssColor(look.swatch) + '"></i><span>' + esc(look.name) + "</span></button>"
+      '<button type="button" class="look' + (state.lastLook === look.name ? " chose" : "") + '" data-action="quick-look" data-name="' + esc(look.name) + '"><i style="background:' + cssColor(look.swatch) + '"></i><span>' + esc(look.name) + "</span></button>"
     ).join("");
     const on = groupIsOn();
+    const sectionAction = state.sections
+      ? '<button class="btn tiny" type="button" data-action="sections-done">Done</button>'
+      : '<button class="btn tiny ghost" type="button" data-action="sections">Sections</button>';
     return '<div class="dock composer">' +
       '<div class="looks">' + looks + scenes + "</div>" +
       '<div class="slider"><button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="-20" aria-label="Dimmer">−</button>' +
       '<input id="look-range" type="range" min="0" max="255" value="' + state.look.bri + '" aria-label="Brightness">' +
       '<button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="20" aria-label="Brighter">+</button></div>' +
-      '<div class="grid2">' +
       '<button class="btn ' + (on ? "primary" : "ghost") + '" type="button" data-action="group-power">' + (on ? "Turn off" : "Turn on") + "</button>" +
-      '<button class="btn" type="button" data-action="backup-all">Back up</button></div>' +
+      '<div class="grid2">' + sectionAction +
+      '<button class="btn tiny ghost" type="button" data-action="more">More</button></div>' +
       (state.undo ? '<button class="btn ghost" type="button" data-action="undo">Undo</button>' : "") +
-      '<button class="btn ghost" type="button" data-action="more">More</button></div>';
+      "</div>";
   }
 
   function paintLeds(retry) {
@@ -381,7 +442,7 @@
   function drawStrip(canvas, leds, active) {
     const dpr = window.devicePixelRatio || 1;
     const width = canvas.clientWidth || 320;
-    const height = 36;
+    const height = canvas.clientHeight || 22;
     canvas.width = Math.floor(width * dpr);
     canvas.height = Math.floor(height * dpr);
     const context = canvas.getContext("2d");
@@ -416,8 +477,10 @@
       const data = await api("/api/control" + query);
       const previous = state.control && state.control.devices ? state.control.devices.map((device) => device.mac).join() : "";
       const next = data.devices.map((device) => device.mac).join();
+      applyFlashOverlay(data);
       state.control = data;
       state.error = "";
+      persistUi();
       if (forceRender || previous !== next || !document.querySelector(".strip")) {
         if (canRepaint()) render();
       } else {
@@ -426,6 +489,79 @@
       }
     } catch (error) {
       if (error.message !== "Sign in required" && !state.control) state.error = error.message;
+    }
+  }
+
+  function applyFlashOverlay(data) {
+    const now = Date.now();
+    (data.devices || []).forEach((device) => {
+      if ((state.flashUntil[device.mac] || 0) <= now) return;
+      device.on = true;
+      const count = Math.max(12, (device.leds || []).length || 16);
+      device.leds = Array.from({ length: count }, () => [255, 255, 255]);
+      device.effect = "Flash";
+    });
+  }
+
+  function copyBoards(macs) {
+    return macs.map((mac) => {
+      const device = ((state.control && state.control.devices) || []).find((item) => item.mac === mac);
+      return device ? JSON.parse(JSON.stringify(device)) : null;
+    }).filter(Boolean);
+  }
+
+  function restoreBoards(copies) {
+    if (!state.control) return;
+    copies.forEach((copy) => {
+      const device = state.control.devices.find((item) => item.mac === copy.mac);
+      if (device) Object.assign(device, copy);
+    });
+    paintLeds();
+    updateStripMeta();
+  }
+
+  function pulseTiles(macs, rgb) {
+    macs.forEach((mac) => {
+      const node = document.querySelector('.strip[data-mac="' + mac + '"]');
+      if (!node) return;
+      node.style.setProperty("--tile-glow", cssColor(rgb));
+      node.classList.remove("glow");
+      void node.offsetWidth;
+      node.classList.add("glow");
+    });
+  }
+
+  function setName(mac, name) {
+    state.devices.forEach((device) => { if (device.mac === mac) device.name = name; });
+    if (state.control) state.control.devices.forEach((device) => { if (device.mac === mac) device.name = name; });
+  }
+
+  let renameLock = false;
+  async function commitRename(mac, raw, cancelled) {
+    if (renameLock) return;
+    renameLock = true;
+    try {
+      const current = ((state.control && state.control.devices) || []).find((item) => item.mac === mac) || deviceBy(mac);
+      const previous = current ? current.name : "";
+      state.renaming = "";
+      if (cancelled || !String(raw || "").trim() || String(raw).trim() === previous) {
+        if (canRepaint()) render();
+        return;
+      }
+      const name = String(raw).trim();
+      setName(mac, name);
+      if (canRepaint()) render();
+      try {
+        const saved = await api("/api/devices/" + compact(mac) + "/rename", { method: "POST", body: JSON.stringify({ name }) });
+        setName(mac, (saved && saved.name) || name);
+        persistUi();
+      } catch (error) {
+        setName(mac, previous);
+        render();
+        if (error.message !== "Sign in required") toast(error.message || "Rename failed");
+      }
+    } finally {
+      renameLock = false;
     }
   }
 
@@ -466,17 +602,32 @@
   async function pushLook(action, id, lookOverride) {
     const macs = targetMacs();
     if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
+    const before = copyBoards(macs);
     if (action === "play-scene") {
       rememberUndo();
-      const results = await api("/api/scenes/" + id + "/apply", { method: "POST", body: JSON.stringify({ macs, sync: false }) });
-      noteResults(results);
+      try {
+        const results = await api("/api/scenes/" + id + "/apply", { method: "POST", body: JSON.stringify({ macs, sync: false }) });
+        noteResults(results);
+      } catch (error) {
+        restoreBoards(before);
+        throw error;
+      }
       return;
     }
     const look = action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) });
     rememberUndo();
     paintOptimistic(macs, look);
-    const results = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs, look, sync: false }) });
-    noteResults(results);
+    const glow = look.col && look.col[0] ? look.col[0] : [255, 200, 80];
+    pulseTiles(macs, look.on === false ? [40, 40, 40] : glow);
+    try {
+      const results = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs, look, sync: false }) });
+      const failed = (results.results || []).filter((row) => !row.ok).map((row) => row.mac);
+      if (failed.length) restoreBoards(before.filter((copy) => failed.indexOf(copy.mac) >= 0));
+      noteResults(results);
+    } catch (error) {
+      restoreBoards(before);
+      throw error;
+    }
   }
 
   function noteResults(results) {
@@ -524,19 +675,19 @@
         const box = state.selecting
           ? '<label class="check"><input type="checkbox" ' + checked + ' data-action="toggle-select" data-mac="' + esc(device.mac) + '"> Select</label>'
           : "";
-        const tag = state.selecting ? "div" : "a";
-        const attr = state.selecting ? "" : ' href="' + href + '"';
-        return "<" + tag + attr + ' class="device">' +
-          '<div class="status"><span class="dot ' + (device.online ? "on" : "off") + '"></span>' +
-          (device.activity ? esc(device.activity) : (device.online ? "Online" : "Offline")) +
-          (device.starred ? " · Marked" : "") + "</div>" +
-          '<p class="name">' + esc(device.name) + "</p>" +
-          '<p class="meta">' + esc(device.arch || "unknown chip") + " · " + esc(device.version || "unknown") +
+        const facts = '<p class="meta">' + esc(device.arch || "unknown chip") + " · " + esc(device.version || "unknown") +
           (device.led_count != null ? " · " + device.led_count + " LEDs" : "") + "</p>" +
           '<p class="meta mono">' + esc(device.ip) + (device.port && device.port !== 80 ? ":" + device.port : "") + " · " + esc(device.mac) + "</p>" +
           '<p class="meta">Backup ' + esc(ago(device.last_backup_at)) + (device.rssi != null ? " · " + device.rssi + " dBm" : "") + "</p>" +
-          (device.last_error ? '<p class="warn">' + esc(device.last_error) + "</p>" : "") +
-          box + "</" + tag + ">";
+          (device.last_error ? '<p class="warn">' + esc(device.last_error) + "</p>" : "");
+        const open = state.selecting ? facts : '<a class="open" href="' + href + '">' + facts + "</a>";
+        return '<div class="device">' +
+          '<div class="status"><span class="dot ' + (device.online ? "on" : "off") + '"></span>' +
+          (device.activity ? esc(device.activity) : (device.online ? "Online" : "Offline")) +
+          (device.starred ? " · Marked" : "") + "</div>" +
+          nameField(device, "devices") +
+          open +
+          box + "</div>";
       }).join("");
     }
     return '<div class="summary"><span>' + online + " online</span><span>Scanned " + esc(scan) + "</span></div>" +
@@ -586,19 +737,24 @@
         ? live.presets.map((preset) => '<button class="chip' + (live.state && live.state.ps === preset.id ? " on" : "") +
           '" type="button" data-action="preset" data-id="' + preset.id + '"' + (online ? "" : " disabled") + ">" + esc(preset.name) + "</button>").join("")
         : '<p class="meta">No presets stored on this controller.</p>') + "</div></div>" +
-      '<div class="grid3"><button class="btn" type="button" data-action="identify"' + (online ? "" : " disabled") + ">Identify</button>" +
+      '<div class="grid3"><button class="btn" type="button" data-action="identify"' + (online ? "" : " disabled") + ">Flash</button>" +
       '<button class="btn" type="button" data-action="reboot-ask"' + (online ? "" : " disabled") + ">Reboot</button>" +
       '<button class="btn" type="button" data-action="backup-now">Backup</button></div>' +
-      segmentBlock(edits, online) +
-      ledBlock(edits, online) +
-      renameBlock(device, live) +
-      backupBlock(device) +
-      '<div class="section"><h2>Firmware</h2><p class="meta">' + esc(device.profile_name || "No profile") +
+      fold("Segments", segmentBlock(edits, online)) +
+      fold("LED outputs", ledBlock(edits, online)) +
+      fold("Name and mDNS", renameBlock(device, live)) +
+      fold("Backups", backupBlock(device)) +
+      fold("Firmware", '<p class="meta">' + esc(device.profile_name || "No profile") +
       (device.board ? " · " + esc(device.board) : "") + "</p>" +
       '<button class="btn primary" type="button" data-action="firmware-open"' + (online ? "" : " disabled") + ">Update firmware</button>" +
-      '<button class="btn ghost" type="button" data-action="secrets-open">PIN and OTA passphrase</button></div>' +
+      '<button class="btn ghost" type="button" data-action="secrets-open">PIN and OTA passphrase</button>') +
       '<button class="btn ghost" type="button" data-action="star">' + (device.starred ? "Unmark" : "Mark") + "</button>" +
       '<button class="btn danger" type="button" data-action="forget-ask">' + (device.forgotten ? "Bring back" : "Forget") + "</button>";
+  }
+
+  function fold(title, inner) {
+    if (!inner) return "";
+    return '<details class="fold"><summary>' + esc(title) + "</summary>" + inner + "</details>";
   }
 
   function segmentBlock(edits, online) {
@@ -769,6 +925,7 @@
     if (sheet.kind === "effects" || sheet.kind === "palettes") return choiceSheet();
     if (sheet.kind === "name") return nameSheet();
     if (sheet.kind === "more") return moreSheet();
+    if (sheet.kind === "sections") return sectionsSheet();
     if (sheet.kind === "boards") return boardsSheet();
     if (sheet.kind === "firmware") return firmwareSheet();
     if (sheet.kind === "secrets") return secretsSheet();
@@ -793,6 +950,7 @@
       '<button type="button" class="btn" data-action="open-effects">Effect</button>' +
       '<button type="button" class="btn" data-action="open-palettes">Palette</button>' +
       presets +
+      '<button type="button" class="btn" data-action="backup-all">Back up</button>' +
       '<button type="button" class="btn" data-action="save-scene">Save this look</button>' +
       (group ? '<button type="button" class="btn" data-action="edit-boards">Boards in ' + esc(group.name) + "</button>" : "") +
       (group ? '<button type="button" class="btn ghost" data-action="rename-group">Rename group</button>' : "") +
@@ -820,8 +978,21 @@
       '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + (kind === "effects" ? "Effect" : "Palette") + '"><h2>' +
       (kind === "effects" ? "Effect" : "Palette") + "</h2>" +
       (items.length ? items.map((name, index) =>
-        '<button type="button" class="rowbtn' + (index === current ? " on" : "") + '" data-action="' + action + '" data-id="' + index + '">' + esc(name) + "</button>"
+        '<button type="button" class="rowbtn rise-in' + (index === current ? " on" : "") + '" style="animation-delay:' + Math.min(index, 12) * 16 + 'ms" data-action="' + action + '" data-id="' + index + '">' + esc(name) + "</button>"
       ).join("") : "<p>This controller did not send a list. The number still applies.</p>") +
+      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+  }
+
+  function sectionsSheet() {
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Identify sections"><h2>Identify sections</h2>' +
+      '<p class="meta">Lights a short marker every few LEDs. Each output gets its own color so you can see which wire is which.</p>' +
+      '<div class="chips">' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="25">25</button>' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="50">50</button>' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="100">100</button></div>' +
+      '<label class="field"><span>Custom size</span><input id="section-every" inputmode="numeric" value="25" aria-label="Custom section size"></label>' +
+      '<button class="btn primary" type="button" data-action="sections-custom">Use custom</button>' +
       '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
   }
 
@@ -880,6 +1051,59 @@
       '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
   }
 
+  function focusRename() {
+    const input = document.querySelector(".rename-input");
+    if (!input) return;
+    input.focus();
+    input.select();
+  }
+
+  function armSectionTimer() {
+    clearTimeout(state.sectionTimer);
+    if (!state.sections || !state.sections.until) return;
+    const wait = Math.max(0, state.sections.until - Date.now());
+    state.sectionTimer = setTimeout(() => {
+      state.sections = null;
+      refreshControl(true);
+    }, wait + 300);
+  }
+
+  async function runSections(every) {
+    const macs = targetMacs();
+    if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
+    const size = Number(every);
+    if (!Number.isFinite(size) || size < 1) throw new Error("Enter a section size.");
+    state.sheet = null;
+    state.sections = { pending: true, every: size, devices: [], until: 0 };
+    render();
+    const result = await api("/api/control/sections", { method: "POST", body: JSON.stringify({ macs, every: size }) });
+    const failed = (result.results || []).filter((row) => !row.ok);
+    if (!(result.devices || []).length) {
+      state.sections = null;
+      render();
+      throw new Error((failed[0] && (failed[0].error || failed[0].name)) || "Could not light sections");
+    }
+    state.sections = {
+      pending: false,
+      every: size,
+      devices: result.devices,
+      until: Date.now() + (Number(result.timeout) || 45) * 1000,
+    };
+    armSectionTimer();
+    render();
+    if (failed.length) toast((failed[0].name || "A board") + " did not mark");
+  }
+
+  async function restoreSections() {
+    const listed = ((state.sections && state.sections.devices) || []).map((device) => device.mac);
+    const macs = listed.length ? listed : targetMacs();
+    clearTimeout(state.sectionTimer);
+    state.sections = null;
+    render();
+    if (macs.length) await api("/api/control/sections/restore", { method: "POST", body: JSON.stringify({ macs }) });
+    await refreshControl(true);
+  }
+
   function resultsSheet() {
     const rows = (state.pending && state.pending.results) || [];
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
@@ -890,6 +1114,12 @@
 
   async function load(resetScroll) {
     state.route = parseRoute();
+    if (state.devices.length || state.control) state.booting = false;
+    let painted = false;
+    if (!state.booting && canRepaint()) {
+      render({ resetScroll: !!resetScroll });
+      painted = true;
+    }
     try {
       if (state.session.required && !state.session.ok) {
         state.booting = false;
@@ -901,7 +1131,9 @@
       const route = state.route;
       if (route.name === "control") {
         const query = state.groupId ? "?group=" + state.groupId : "";
-        state.control = await api("/api/control" + query);
+        const data = await api("/api/control" + query);
+        applyFlashOverlay(data);
+        state.control = data;
       }
       if (route.name === "device" && !state.hold) {
         state.live = await api("/api/devices/" + route.mac + "/live");
@@ -917,10 +1149,12 @@
       if (route.name === "settings") state.settings = await api("/api/settings");
       state.error = "";
     } catch (error) {
-      if (error.message !== "Sign in required") state.error = error.message;
+      if (error.message !== "Sign in required" && !state.devices.length && !state.control) state.error = error.message;
     }
     state.booting = false;
-    if (resetScroll || canRepaint()) render({ resetScroll: !!resetScroll });
+    persistUi();
+    if (canRepaint()) render({ resetScroll: !!resetScroll && !painted });
+    focusRename();
   }
 
   async function refresh() {
@@ -1045,20 +1279,79 @@
     }
     if (action === "pick-board") {
       if (event.target.closest("input, label, button, a")) return;
-      if (state.skipped[target.dataset.mac]) delete state.skipped[target.dataset.mac];
-      else state.skipped[target.dataset.mac] = true;
+      const mac = target.dataset.mac;
+      const now = Date.now();
+      if (state.pickMac === mac && now - state.pickAt < 320) {
+        state.pickMac = "";
+        state.pickAt = 0;
+        const devices = (state.control && state.control.devices) || [];
+        state.skipped = {};
+        devices.forEach((device) => {
+          if (device.mac !== mac) state.skipped[device.mac] = true;
+        });
+        state.justSelected = mac;
+        render();
+        return;
+      }
+      state.pickMac = mac;
+      state.pickAt = now;
+      if (state.skipped[mac]) delete state.skipped[mac];
+      else state.skipped[mac] = true;
+      state.justSelected = "";
       render();
+      return;
+    }
+    if (action === "rename-start") {
+      event.preventDefault();
+      state.renaming = target.dataset.mac;
+      render();
+      focusRename();
+      return;
+    }
+    if (action === "flash") {
+      const mac = target.dataset.mac;
+      const before = copyBoards([mac]);
+      state.flashUntil[mac] = Date.now() + 3000;
+      paintOptimistic([mac], { on: true, bri: 255, col: [[255, 255, 255], [0, 0, 0], [0, 0, 0]] });
+      pulseTiles([mac], [255, 255, 255]);
+      await run(target, "…", async () => {
+        try {
+          await api("/api/devices/" + compact(mac) + "/identify", { method: "POST" });
+        } catch (error) {
+          delete state.flashUntil[mac];
+          restoreBoards(before);
+          throw error;
+        }
+        delete state.flashUntil[mac];
+        await refreshControl(true);
+      });
+      return;
+    }
+    if (action === "sections") {
+      state.sheet = { kind: "sections" };
+      render();
+      return;
+    }
+    if (action === "sections-go" || action === "sections-custom") {
+      const every = action === "sections-custom" ? Number(value("section-every")) : Number(target.dataset.every);
+      await run(target, "…", () => runSections(every));
+      return;
+    }
+    if (action === "sections-done") {
+      await run(target, "…", restoreSections);
       return;
     }
     if (action === "use-group") {
       state.groupId = target.dataset.id ? Number(target.dataset.id) : null;
       state.skipped = {};
+      render();
       await refreshControl(true);
       return;
     }
     if (action === "quick-look") {
       const preset = LOOKS.filter((item) => item.name === target.dataset.name)[0];
       if (!preset) return;
+      state.lastLook = preset.name;
       const look = Object.assign({}, preset.look);
       if (preset.effect) look.fx = effectId(preset.effect);
       await run(target, preset.name, () => pushLook("direct", null, look));
@@ -1717,7 +2010,26 @@
     state.edits = null;
     state.selecting = false;
     state.selected = {};
-    load(true);
+    state.route = parseRoute();
+    state.booting = false;
+    if (canRepaint()) render({ resetScroll: true });
+    load(false);
+  });
+  root.addEventListener("focusout", (event) => {
+    const input = event.target;
+    if (!input || !input.classList || !input.classList.contains("rename-input")) return;
+    commitRename(input.dataset.mac, input.value, input.dataset.cancel === "1");
+  });
+  root.addEventListener("keydown", (event) => {
+    const input = event.target;
+    if (!input || !input.classList || !input.classList.contains("rename-input")) return;
+    if (event.key === "Enter") {
+      event.preventDefault();
+      input.blur();
+    } else if (event.key === "Escape") {
+      input.dataset.cancel = "1";
+      input.blur();
+    }
   });
   document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
   window.addEventListener("beforeinstallprompt", (event) => {
@@ -1728,6 +2040,8 @@
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 
   async function boot() {
+    state.route = parseRoute();
+    if (!state.booting) render();
     try {
       state.session = await api("/api/session");
     } catch (error) {
