@@ -1,0 +1,44 @@
+# Alternative when host networking is unavailable.
+# The container gets its own LAN address and can hear multicast.
+# A macvlan container cannot talk to the host that owns the parent NIC.
+# Replace parent, subnet, gateway, and address with the values from your LAN.
+# ipvlan (driver: ipvlan, driver_opts: mode: l2) is the same shape if macvlan is blocked.
+
+services:
+  wled-fleet:
+    image: ${WLED_FLEET_IMAGE:-wled-fleet:local}
+    build: .
+    restart: unless-stopped
+    environment:
+      PORT: ${PORT:-8787}
+      TZ: ${TZ:-UTC}
+      PUID: ${PUID:-568}
+      PGID: ${PGID:-568}
+      DATA_DIR: /data
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      SCAN_SUBNETS: ${SCAN_SUBNETS:-}
+      BACKUP_INTERVAL: ${BACKUP_INTERVAL:-86400}
+      BACKUP_WATCH_INTERVAL: ${BACKUP_WATCH_INTERVAL:-900}
+      BACKUP_RETENTION: ${BACKUP_RETENTION:-30}
+    volumes:
+      - ${DATA_PATH:-./data}:/data
+    networks:
+      lan:
+        ipv4_address: 192.168.1.240
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  lan:
+    driver: macvlan
+    driver_opts:
+      parent: eno1
+    ipam:
+      config:
+        - subnet: 192.168.1.0/24
+          gateway: 192.168.1.1
+          ip_range: 192.168.1.240/32

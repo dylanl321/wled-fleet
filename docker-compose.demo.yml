@@ -1,0 +1,89 @@
+# Demo stack: the fleet app plus two mock controllers, no LAN hardware required.
+# docker compose -f docker-compose.demo.yml up --build
+
+services:
+  wled-fleet:
+    image: wled-fleet:local
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      PORT: "8787"
+      DATA_DIR: /data
+      PUID: "568"
+      PGID: "568"
+      EXTRA_HOSTS: "mock-shelf:9091"
+      DISCOVERY_INTERVAL: "8"
+      PRESENCE_INTERVAL: "5"
+      BACKUP_WATCH_INTERVAL: "15"
+      BACKUP_INTERVAL: "86400"
+      BACKUP_RETENTION: "30"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - demo-data:/data
+    depends_on:
+      - mock-shelf
+      - mock-porch
+    healthcheck:
+      test: ["CMD", "python", "-m", "app.healthcheck"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  mock-shelf:
+    image: wled-fleet:local
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "mock.wled_mock"]
+    environment:
+      MOCK_HOST: 0.0.0.0
+      MOCK_PORT: "9091"
+      MOCK_MAC: "a1b2c3d4e5f0"
+      MOCK_NAME: "Dig-Uno Shelf"
+      MOCK_MDNS_NAME: "dig-uno-shelf"
+      MOCK_ARCH: "esp32"
+      MOCK_RELEASE: "Dig-Uno-V3"
+      MOCK_VERSION: "16.0.1"
+      MOCK_LEDS: "150"
+      MOCK_PEERS: "mock-porch:9092"
+      MOCK_MDNS: "0"
+      MOCK_RSSI: "-55"
+      PUID: "568"
+      PGID: "568"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9091/json/info', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  mock-porch:
+    image: wled-fleet:local
+    build: .
+    restart: unless-stopped
+    command: ["python", "-m", "mock.wled_mock"]
+    environment:
+      MOCK_HOST: 0.0.0.0
+      MOCK_PORT: "9092"
+      MOCK_MAC: "b2c3d4e5f607"
+      MOCK_NAME: "Dig-Uno Porch"
+      MOCK_MDNS_NAME: "dig-uno-porch"
+      MOCK_ARCH: "esp8266"
+      MOCK_RELEASE: "ESP8266"
+      MOCK_VERSION: "0.14.4"
+      MOCK_LEDS: "60"
+      MOCK_MDNS: "0"
+      MOCK_RSSI: "-72"
+      PUID: "568"
+      PGID: "568"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9092/json/info', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  demo-data:
