@@ -554,8 +554,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name = clean_name(body.name)
         if not name:
             raise HTTPException(status_code=400, detail="Enter a group name.")
-        group = fleet_of(request).db.create_group(name)
-        fleet_of(request).event("info", "group.create", f"Created group {name}")
+        fleet = fleet_of(request)
+        macs = _macs(request, body.macs) if body.macs is not None else None
+        group = fleet.db.create_group(name, macs)
+        fleet.event("info", "group.create", f"Created group {name}")
         return group
 
     @app.patch("/api/groups/{group_id}")
@@ -566,6 +568,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         name = clean_name(body.name)
         if not name:
             raise HTTPException(status_code=400, detail="Enter a group name.")
+        if body.macs is not None:
+            return fleet.db.update_group(group_id, name, _macs(request, body.macs))
         fleet.db.rename_group(group_id, name)
         updated = fleet.db.get_group(group_id)
         assert updated is not None
