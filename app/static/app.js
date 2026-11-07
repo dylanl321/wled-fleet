@@ -28,6 +28,17 @@
     pending: null,
     edits: null,
     draftColor: { r: 255, g: 170, b: 70 },
+    control: null,
+    groupId: null,
+    picked: {},
+    look: { on: true, bri: 180, col: [[255, 170, 70], [40, 8, 0], [0, 0, 0]], fx: 0, pal: 0, sx: 128, ix: 128 },
+    skipped: {},
+    undo: null,
+    holdingUndo: false,
+    colorSlot: 0,
+    applyMarks: {},
+    drag: null,
+    suppressClick: false,
     selecting: false,
     selected: {},
     showForgotten: false,
@@ -60,6 +71,8 @@
 
   function parseRoute() {
     const parts = (location.hash || "#/").replace(/^#/, "").split("/").filter(Boolean);
+    if (!parts.length || parts[0] === "control") return { name: "control" };
+    if (parts[0] === "devices") return { name: "devices" };
     if (parts[0] === "d" && parts[1]) return { name: "device", mac: parts[1] };
     if (parts[0] === "firmware") return { name: "firmware" };
     if (parts[0] === "events") return { name: "events" };
@@ -148,6 +161,7 @@
 
   function icon(name) {
     const paths = {
+      control: '<path d="M12 3l1.6 4.8L18.5 9.5 13.6 11 12 16l-1.6-5L5.5 9.5 10.4 7.8z"/>',
       devices: '<circle cx="8" cy="8" r="2.2"/><circle cx="16" cy="8" r="2.2"/><circle cx="8" cy="16" r="2.2"/><circle cx="16" cy="16" r="2.2"/>',
       firmware: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/>',
       events: '<path d="M5 16c2-6 4-6 6 0s4 6 6 0"/><circle cx="12" cy="12" r="9"/>',
@@ -178,7 +192,10 @@
     const next = document.querySelector("main");
     if (next) next.scrollTop = y;
     document.body.classList.toggle("sheet-open", Boolean(state.sheet));
-    document.body.classList.toggle("has-dock", state.route.name === "device" && !!(state.live && state.live.state));
+    const deviceDock = state.route.name === "device" && !!(state.live && state.live.state);
+    document.body.classList.toggle("has-dock", deviceDock || state.route.name === "control");
+    document.body.classList.toggle("has-control", state.route.name === "control");
+    paintLeds();
   }
 
   function shell() {
@@ -193,18 +210,23 @@
     if (route.name === "device" || route.name === "backup" || route.name === "diff") {
       const device = deviceBy(route.mac);
       title = device ? device.name : "Controller";
-      const href = route.name === "device" ? "#/" : "#/d/" + route.mac;
+      const href = route.name === "device" ? "#/devices" : "#/d/" + route.mac;
       back = '<a class="back" href="' + href + '">Back</a>';
-    } else if (route.name === "firmware") title = "Firmware";
+    } else if (route.name === "control") title = "Control";
+    else if (route.name === "firmware") title = "Firmware";
     else if (route.name === "events") title = "Activity";
     else if (route.name === "settings") title = "Settings";
-    const action = route.name === "devices"
-      ? '<button class="iconbtn" type="button" data-action="select-toggle">' + (state.selecting ? "Done" : "Select") + "</button>"
-      : '<button class="iconbtn" type="button" data-action="refresh">Refresh</button>';
+    let action = '<button class="iconbtn" type="button" data-action="refresh">Refresh</button>';
+    if (route.name === "devices") {
+      action = '<button class="iconbtn" type="button" data-action="select-toggle">' + (state.selecting ? "Done" : "Select") + "</button>";
+    } else if (route.name === "control" && state.undo) {
+      action = '<button class="iconbtn" type="button" data-action="undo">Undo</button>';
+    }
     return '<header class="topbar">' + back + '<span class="mark"></span><h1>' + esc(title) + "</h1>" + action + "</header>";
   }
 
   function dockHtml() {
+    if (state.route.name === "control") return controlDock();
     if (state.route.name !== "device" || !state.live || !state.live.state) return "";
     const device = deviceBy(state.route.mac);
     const online = !!(device && device.online && state.live.online);
@@ -222,7 +244,8 @@
 
   function tabbar() {
     const tabs = [
-      ["devices", "#/", "Devices"],
+      ["control", "#/", "Control"],
+      ["devices", "#/devices", "Devices"],
       ["firmware", "#/firmware", "Firmware"],
       ["events", "#/events", "Activity"],
       ["settings", "#/settings", "Settings"],
@@ -246,6 +269,7 @@
     if (state.booting) return '<p class="boot">Loading controllers…</p>';
     if (state.error) return '<p class="error">' + esc(state.error) + '</p><button class="btn" type="button" data-action="refresh">Try again</button>';
     const views = {
+      control: viewControl,
       devices: viewDevices,
       device: viewDevice,
       firmware: viewFirmware,
@@ -268,6 +292,220 @@
       : "Add WLED Fleet to your home screen so the controls stay under your thumb.";
     return '<section class="banner"><strong>Keep it on your phone</strong><p>' + hint + "</p>" + button +
       '<button class="btn ghost" type="button" data-action="dismiss-install">Not now</button></section>';
+  }
+
+  function cssColor(rgb) {
+    const color = rgb && rgb.length >= 3 ? rgb : [0, 0, 0];
+    return "rgb(" + color.map((part) => Number(part) || 0).join(",") + ")";
+  }
+
+  const LOOKS = [
+    { name: "Warm", swatch: [255, 170, 70], look: { on: true, bri: 170, col: [[255, 170, 70], [90, 30, 0], [0, 0, 0]], fx: 0 } },
+    { name: "Night", swatch: [255, 110, 30], effect: "breathe", look: { on: true, bri: 28, col: [[255, 100, 24], [60, 10, 0], [0, 0, 0]], fx: 0, sx: 30 } },
+    { name: "Bright", swatch: [255, 255, 245], look: { on: true, bri: 255, col: [[255, 255, 245], [0, 0, 0], [0, 0, 0]], fx: 0 } },
+    { name: "Rainbow", swatch: [80, 140, 255], effect: "rainbow", look: { on: true, bri: 180, col: [[255, 40, 40], [40, 255, 80], [40, 80, 255]], fx: 0, sx: 140 } },
+  ];
+
+  function effectId(part) {
+    const names = (state.control && state.control.effects) || [];
+    const index = names.findIndex((name) => String(name).toLowerCase().indexOf(part) >= 0);
+    return index >= 0 ? index : 0;
+  }
+
+  function targetMacs() {
+    const devices = (state.control && state.control.devices) || [];
+    return devices.filter((device) => device.online && !state.skipped[device.mac]).map((device) => device.mac);
+  }
+
+  function groupIsOn() {
+    const macs = targetMacs();
+    const devices = ((state.control && state.control.devices) || []).filter((device) => macs.indexOf(device.mac) >= 0);
+    return devices.some((device) => device.on);
+  }
+
+  function viewControl() {
+    const data = state.control;
+    if (!data) return '<p class="boot">Reading the boards…</p>';
+    const groups = data.groups || [];
+    const chips = '<button type="button" class="chip' + (state.groupId == null ? " on" : "") + '" data-action="use-group" data-id="">All</button>' +
+      groups.map((group) => '<button type="button" class="chip' + (Number(state.groupId) === group.id ? " on" : "") + '" data-action="use-group" data-id="' + group.id + '">' + esc(group.name) + "</button>").join("") +
+      '<button type="button" class="chip" data-action="new-group">+</button>';
+    const boards = (data.devices || []).map((device) => stripCard(device)).join("");
+    return '<div class="groups">' + chips + "</div>" +
+      (boards || '<section class="card"><h2>No boards yet</h2><p class="meta">They show up here on their own once they join the network.</p></section>');
+  }
+
+  function stripCard(device) {
+    const skipped = state.skipped[device.mac] ? " skipped" : "";
+    const mark = state.applyMarks[device.mac];
+    const markHtml = mark && !mark.ok ? '<span class="pill bad">' + esc(mark.error) + "</span>" : "";
+    return '<article class="strip' + skipped + (device.online ? "" : " off") + '" data-action="pick-board" data-mac="' + esc(device.mac) + '">' +
+      '<div class="strip-head"><span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' +
+      (device.online ? (state.skipped[device.mac] ? "Left out" : (device.on ? "On" : "Off")) : "Offline") + "</span><strong>" + esc(device.name) + "</strong>" + markHtml + "</div>" +
+      '<canvas data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + '"></canvas>' +
+      '<p class="meta" data-meta="' + compact(device.mac) + '">' + esc(device.effect || "") + "</p></article>";
+  }
+
+  function controlDock() {
+    const scenes = ((state.control && state.control.scenes) || []).map((scene) =>
+      '<button type="button" class="look" data-action="play-scene" data-id="' + scene.id + '"><span>' + esc(scene.name) + "</span></button>"
+    ).join("");
+    const looks = LOOKS.map((look) =>
+      '<button type="button" class="look" data-action="quick-look" data-name="' + esc(look.name) + '"><i style="background:' + cssColor(look.swatch) + '"></i><span>' + esc(look.name) + "</span></button>"
+    ).join("");
+    const on = groupIsOn();
+    return '<div class="dock composer">' +
+      '<div class="looks">' + looks + scenes + "</div>" +
+      '<div class="slider"><button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="-20" aria-label="Dimmer">−</button>' +
+      '<input id="look-range" type="range" min="0" max="255" value="' + state.look.bri + '" aria-label="Brightness">' +
+      '<button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="20" aria-label="Brighter">+</button></div>' +
+      '<div class="grid2">' +
+      '<button class="btn ' + (on ? "primary" : "ghost") + '" type="button" data-action="group-power">' + (on ? "Turn off" : "Turn on") + "</button>" +
+      '<button class="btn" type="button" data-action="backup-all">Back up</button></div>' +
+      (state.undo ? '<button class="btn ghost" type="button" data-action="undo">Undo</button>' : "") +
+      '<button class="btn ghost" type="button" data-action="more">More</button></div>';
+  }
+
+  function paintLeds(retry) {
+    if (!state.control) return;
+    let waiting = false;
+    state.control.devices.forEach((device) => {
+      const canvas = document.querySelector('canvas[data-mac="' + compact(device.mac) + '"]');
+      if (!canvas) return;
+      if (!canvas.clientWidth) waiting = true;
+      drawStrip(canvas, device.leds, device.online && device.on);
+    });
+    if (waiting && !retry) requestAnimationFrame(() => paintLeds(true));
+  }
+
+  function drawStrip(canvas, leds, active) {
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.clientWidth || 320;
+    const height = 36;
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    const context = canvas.getContext("2d");
+    if (!context) return;
+    context.setTransform(dpr, 0, 0, dpr, 0, 0);
+    context.clearRect(0, 0, width, height);
+    const colors = leds && leds.length ? leds : [[28, 28, 26]];
+    const gap = 2;
+    const ledWidth = Math.max(3, (width - gap * (colors.length - 1)) / colors.length);
+    colors.forEach((rgb, index) => {
+      context.fillStyle = active ? cssColor(rgb) : "#2a2e2b";
+      const x = index * (ledWidth + gap);
+      context.beginPath();
+      context.roundRect(x, 6, Math.max(2, ledWidth), 24, 4);
+      context.fill();
+    });
+  }
+
+  function updateStripMeta() {
+    if (!state.control) return;
+    state.control.devices.forEach((device) => {
+      const node = document.querySelector('[data-meta="' + compact(device.mac) + '"]');
+      if (!node) return;
+      node.textContent = device.effect || "";
+    });
+  }
+
+  async function refreshControl(forceRender) {
+    if (state.route.name !== "control") return;
+    try {
+      const query = state.groupId ? "?group=" + state.groupId : "";
+      const data = await api("/api/control" + query);
+      const previous = state.control && state.control.devices ? state.control.devices.map((device) => device.mac).join() : "";
+      const next = data.devices.map((device) => device.mac).join();
+      state.control = data;
+      state.error = "";
+      if (forceRender || previous !== next || !document.querySelector(".strip")) {
+        if (canRepaint()) render();
+      } else {
+        paintLeds();
+        updateStripMeta();
+      }
+    } catch (error) {
+      if (error.message !== "Sign in required" && !state.control) state.error = error.message;
+    }
+  }
+
+  function rememberUndo() {
+    if (state.holdingUndo) return;
+    const macs = targetMacs();
+    state.undo = macs.map((mac) => {
+      const device = ((state.control && state.control.devices) || []).find((item) => item.mac === mac);
+      if (!device) return null;
+      return {
+        mac,
+        look: { on: device.on, bri: device.bri, col: device.col, fx: device.fx, pal: device.pal, sx: device.sx, ix: device.ix },
+      };
+    }).filter(Boolean);
+  }
+
+  function paintOptimistic(macs, look) {
+    if (!state.control) return;
+    macs.forEach((mac) => {
+      const device = state.control.devices.find((item) => item.mac === mac);
+      if (!device) return;
+      if (look.on != null) device.on = look.on;
+      if (look.bri != null) device.bri = look.bri;
+      if (look.fx != null && state.control.effects && state.control.effects[look.fx]) device.effect = state.control.effects[look.fx];
+      if (look.col && look.col[0]) {
+        device.col = look.col;
+        const level = device.on ? Number(device.bri || 0) / 255 : 0;
+        const color = look.col[0].map((channel) => Math.round(channel * level));
+        const count = Math.max(12, (device.leds || []).length || 16);
+        device.leds = Array.from({ length: count }, () => color);
+      }
+      if (look.on === false) device.leds = (device.leds || [0]).map(() => [0, 0, 0]);
+    });
+    paintLeds();
+    updateStripMeta();
+  }
+
+  async function pushLook(action, id, lookOverride) {
+    const macs = targetMacs();
+    if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
+    if (action === "play-scene") {
+      rememberUndo();
+      const results = await api("/api/scenes/" + id + "/apply", { method: "POST", body: JSON.stringify({ macs, sync: false }) });
+      noteResults(results);
+      return;
+    }
+    const look = action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) });
+    rememberUndo();
+    paintOptimistic(macs, look);
+    const results = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs, look, sync: false }) });
+    noteResults(results);
+  }
+
+  function noteResults(results) {
+    state.applyMarks = {};
+    (results.results || []).forEach((row) => { state.applyMarks[row.mac] = row; });
+    const failed = (results.results || []).filter((row) => !row.ok);
+    if (failed.length) toast(failed[0].name + " did not change");
+    refreshControl(true);
+  }
+
+  let brightnessTimer = 0;
+  function queueBrightness() {
+    clearTimeout(brightnessTimer);
+    brightnessTimer = setTimeout(() => {
+      pushLook("direct", null, { on: true, bri: Number(state.look.bri) }).catch((error) => toast(error.message));
+    }, 180);
+  }
+
+  function nudgeLook(key, delta) {
+    const current = Number(state.look[key] || 0);
+    state.look[key] = Math.max(0, Math.min(255, current + delta));
+    if (key === "bri") {
+      const range = document.getElementById("look-range");
+      const readout = document.querySelector(".composer .readout span");
+      if (range) range.value = String(state.look.bri);
+      if (readout && !Object.keys(state.picked).length) readout.textContent = "Tap boards or a group";
+    }
+    const node = document.querySelector('[data-look-readout="' + key + '"]');
+    if (node) node.textContent = String(state.look[key]);
   }
 
   function viewDevices() {
@@ -302,6 +540,7 @@
       }).join("");
     }
     return '<div class="summary"><span>' + online + " online</span><span>Scanned " + esc(scan) + "</span></div>" +
+      '<button class="btn primary" type="button" data-action="backup-all">Back up all</button>' +
       installBanner() + list +
       (forgotten ? '<button class="btn ghost" type="button" data-action="forgotten-toggle">' +
         (state.showForgotten ? "Hide forgotten" : "Forgotten (" + forgotten + ")") + "</button>" : "");
@@ -527,6 +766,10 @@
     const sheet = state.sheet;
     if (!sheet) return "";
     if (sheet.kind === "color") return colorSheet();
+    if (sheet.kind === "effects" || sheet.kind === "palettes") return choiceSheet();
+    if (sheet.kind === "name") return nameSheet();
+    if (sheet.kind === "more") return moreSheet();
+    if (sheet.kind === "boards") return boardsSheet();
     if (sheet.kind === "firmware") return firmwareSheet();
     if (sheet.kind === "secrets") return secretsSheet();
     if (sheet.kind === "results") return resultsSheet();
@@ -536,6 +779,60 @@
       (sheet.warnings || []).map((item) => '<p class="warn">' + esc(item) + "</p>").join("") +
       '<button class="btn ' + (sheet.danger ? "danger" : "primary") + '" type="button" data-action="confirm">' + esc(sheet.confirm || "Confirm") +
       '</button><button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+  }
+
+  function moreSheet() {
+    const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
+    const presets = ((state.control && state.control.presets) || []).map((preset) =>
+      '<button type="button" class="btn" data-action="apply-preset" data-id="' + preset.id + '">' + esc(preset.name) + "</button>"
+    ).join("");
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="More"><h2>More</h2>' +
+      '<div class="grid2"><button type="button" class="btn" data-action="tune" data-dir="-40">Slower</button>' +
+      '<button type="button" class="btn" data-action="tune" data-dir="40">Faster</button></div>' +
+      '<button type="button" class="btn" data-action="open-effects">Effect</button>' +
+      '<button type="button" class="btn" data-action="open-palettes">Palette</button>' +
+      presets +
+      '<button type="button" class="btn" data-action="save-scene">Save this look</button>' +
+      (group ? '<button type="button" class="btn" data-action="edit-boards">Boards in ' + esc(group.name) + "</button>" : "") +
+      (group ? '<button type="button" class="btn ghost" data-action="rename-group">Rename group</button>' : "") +
+      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+  }
+
+  function boardsSheet() {
+    const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
+    const members = group ? group.macs : [];
+    const rows = state.devices.filter((device) => !device.forgotten).map((device) =>
+      '<label class="check"><input type="checkbox" data-action="member" data-group="' + state.groupId + '" data-mac="' + esc(device.mac) + '"' +
+      (members.indexOf(device.mac) >= 0 ? " checked" : "") + "> " + esc(device.name) + "</label>"
+    ).join("");
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Boards"><h2>' + esc(group ? group.name : "Boards") + "</h2>" +
+      rows + '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+  }
+
+  function choiceSheet() {
+    const kind = state.sheet.kind;
+    const items = kind === "effects" ? ((state.control && state.control.effects) || []) : ((state.control && state.control.palettes) || []);
+    const action = kind === "effects" ? "pick-effect" : "pick-palette";
+    const current = kind === "effects" ? state.look.fx : state.look.pal;
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + (kind === "effects" ? "Effect" : "Palette") + '"><h2>' +
+      (kind === "effects" ? "Effect" : "Palette") + "</h2>" +
+      (items.length ? items.map((name, index) =>
+        '<button type="button" class="rowbtn' + (index === current ? " on" : "") + '" data-action="' + action + '" data-id="' + index + '">' + esc(name) + "</button>"
+      ).join("") : "<p>This controller did not send a list. The number still applies.</p>") +
+      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+  }
+
+  function nameSheet() {
+    const sheet = state.sheet;
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + esc(sheet.title) + '"><h2>' + esc(sheet.title) + "</h2>" +
+      '<label class="field"><span>Name</span><input id="sheet-name" type="text" maxlength="32" value="' + esc(sheet.value || "") + '"></label>' +
+      '<button class="btn primary" type="button" data-action="save-name">Save</button>' +
+      (sheet.mode === "rename" ? '<button class="btn danger" type="button" data-action="delete-group">Delete group</button>' : "") +
+      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
   }
 
   function colorSheet() {
@@ -602,6 +899,10 @@
       state.devices = await api("/api/devices");
       state.status = await api("/api/status");
       const route = state.route;
+      if (route.name === "control") {
+        const query = state.groupId ? "?group=" + state.groupId : "";
+        state.control = await api("/api/control" + query);
+      }
       if (route.name === "device" && !state.hold) {
         state.live = await api("/api/devices/" + route.mac + "/live");
         state.backups = await api("/api/devices/" + route.mac + "/backups");
@@ -742,6 +1043,149 @@
       render();
       return;
     }
+    if (action === "pick-board") {
+      if (event.target.closest("input, label, button, a")) return;
+      if (state.skipped[target.dataset.mac]) delete state.skipped[target.dataset.mac];
+      else state.skipped[target.dataset.mac] = true;
+      render();
+      return;
+    }
+    if (action === "use-group") {
+      state.groupId = target.dataset.id ? Number(target.dataset.id) : null;
+      state.skipped = {};
+      await refreshControl(true);
+      return;
+    }
+    if (action === "quick-look") {
+      const preset = LOOKS.filter((item) => item.name === target.dataset.name)[0];
+      if (!preset) return;
+      const look = Object.assign({}, preset.look);
+      if (preset.effect) look.fx = effectId(preset.effect);
+      await run(target, preset.name, () => pushLook("direct", null, look));
+      return;
+    }
+    if (action === "group-power") {
+      const turnOn = !groupIsOn();
+      await run(target, turnOn ? "On…" : "Off…", () => pushLook("direct", null, turnOn ? { on: true, bri: Math.max(Number(state.look.bri) || 0, 140) } : { on: false }));
+      return;
+    }
+    if (action === "backup-all") {
+      await run(target, "Backing up…", async () => {
+        const macs = state.devices.filter((device) => device.online && !device.forgotten).map((device) => device.mac);
+        if (!macs.length) throw new Error("No boards are on the network.");
+        await watchJob(await api("/api/bulk/backup", { method: "POST", body: JSON.stringify({ macs }) }));
+      });
+      return;
+    }
+    if (action === "undo") {
+      const frames = state.undo || [];
+      state.undo = null;
+      state.holdingUndo = false;
+      await run(target, "Undoing…", async () => {
+        const results = { results: [] };
+        for (let index = 0; index < frames.length; index += 1) {
+          const frame = frames[index];
+          const response = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs: [frame.mac], look: frame.look, sync: false }) });
+          results.results = results.results.concat(response.results || []);
+        }
+        noteResults(results);
+      });
+      return;
+    }
+    if (action === "more") {
+      state.sheet = { kind: "more" };
+      render();
+      return;
+    }
+    if (action === "edit-boards") {
+      state.sheet = { kind: "boards" };
+      render();
+      return;
+    }
+    if (action === "rename-group") {
+      const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
+      state.sheet = { kind: "name", mode: "rename", id: Number(state.groupId), title: "Rename", value: group ? group.name : "" };
+      render();
+      return;
+    }
+    if (action === "new-group") {
+      state.sheet = { kind: "name", mode: "group", title: "New group", value: "" };
+      render();
+      return;
+    }
+    if (action === "save-scene") {
+      state.sheet = { kind: "name", mode: "scene", title: "Save look", value: "" };
+      render();
+      return;
+    }
+    if (action === "save-name") {
+      const name = value("sheet-name");
+      const sheet = state.sheet;
+      await run(target, "Saving…", async () => {
+        if (sheet.mode === "group") {
+          const created = await api("/api/groups", { method: "POST", body: JSON.stringify({ name }) });
+          const macs = ((state.control && state.control.devices) || []).filter((device) => device.online).map((device) => device.mac);
+          if (macs.length) await api("/api/groups/" + created.id + "/members", { method: "PUT", body: JSON.stringify({ macs }) });
+          state.groupId = created.id;
+          state.skipped = {};
+        }
+        if (sheet.mode === "rename") await api("/api/groups/" + sheet.id, { method: "PATCH", body: JSON.stringify({ name }) });
+        if (sheet.mode === "scene") {
+          await api("/api/scenes", { method: "POST", body: JSON.stringify({ name, look: currentLook() }) });
+        }
+        state.sheet = null;
+        await refreshControl(true);
+      });
+      return;
+    }
+    if (action === "delete-group") {
+      await run(target, "Deleting…", async () => {
+        await api("/api/groups/" + state.sheet.id, { method: "DELETE" });
+        if (Number(state.groupId) === Number(state.sheet.id)) state.groupId = null;
+        state.sheet = null;
+        await refreshControl(true);
+      });
+      return;
+    }
+    if (action === "look-color") {
+      state.colorSlot = Number(target.dataset.slot);
+      const color = state.look.col[state.colorSlot] || [255, 170, 70];
+      state.draftColor = { r: color[0], g: color[1], b: color[2] };
+      state.sheet = { kind: "color" };
+      render();
+      return;
+    }
+    if (action === "look-power") {
+      await run(target, "…", () => pushLook("direct", null, { on: !groupIsOn() }));
+      return;
+    }
+    if (action === "open-effects") {
+      state.sheet = { kind: "effects" };
+      render();
+      return;
+    }
+    if (action === "open-palettes") {
+      state.sheet = { kind: "palettes" };
+      render();
+      return;
+    }
+    if (action === "pick-effect" || action === "pick-palette") {
+      const key = action === "pick-effect" ? "fx" : "pal";
+      state.sheet = null;
+      await run(target, "…", () => pushLook("direct", null, { on: true, [key]: Number(target.dataset.id) }));
+      return;
+    }
+    if (action === "apply-preset" || action === "play-scene") {
+      await run(target, "…", () => pushLook(action, target.dataset.id));
+      return;
+    }
+    if (action === "tune") {
+      const delta = Number(target.dataset.dir);
+      const device = (state.control.devices || []).find((item) => targetMacs().indexOf(item.mac) >= 0);
+      const next = Math.max(0, Math.min(255, Number(device ? device.sx : 128) + delta));
+      await run(target, "…", () => pushLook("direct", null, { sx: next }));
+      return;
+    }
     if (action === "confirm") {
       await run(target, "Working…", confirmPending);
       return;
@@ -798,6 +1242,12 @@
     }
     if (action === "apply-color") {
       const color = state.draftColor;
+      if (state.route.name === "control") {
+        state.look.col[state.colorSlot] = [color.r, color.g, color.b];
+        state.sheet = null;
+        render();
+        return;
+      }
       await run(target, "Setting…", async () => {
         const next = await api("/api/devices/" + state.route.mac + "/color", {
           method: "POST",
@@ -1079,6 +1529,20 @@
       state.hold = false;
       postState({ bri: Number(target.value) }).catch((error) => toast(error.message));
     }
+    if (target.id === "look-range") {
+      state.hold = false;
+      state.look.bri = Number(target.value);
+      queueBrightness();
+    }
+    if (target.dataset.action === "member") {
+      const mac = target.dataset.mac;
+      const groupId = target.dataset.group;
+      const path = "/api/groups/" + groupId + "/members" + (target.checked ? "" : "/" + compact(mac));
+      const options = target.checked
+        ? { method: "POST", body: JSON.stringify({ mac }) }
+        : { method: "DELETE" };
+      api(path, options).then(() => refreshControl(true)).catch((error) => toast(error.message));
+    }
     if (target.dataset.action === "typed") {
       const device = deviceBy(state.route.mac);
       if (!device) return;
@@ -1101,6 +1565,11 @@
   }
 
   function onInput(event) {
+    if (event.target.id === "look-range") {
+      state.hold = true;
+      state.look.bri = Number(event.target.value);
+      return;
+    }
     if (event.target.id === "bri-range") {
       state.hold = true;
       const readout = document.getElementById("bri-readout");
@@ -1140,6 +1609,9 @@
         range.value = String(Math.max(0, Math.min(255, Number(range.value) + Number(button.dataset.dir) * 15)));
         range.dispatchEvent(new Event("input", { bubbles: true }));
         range.dispatchEvent(new Event("change", { bubbles: true }));
+      } else if (button.dataset.action === "look-nudge") {
+        nudgeLook(button.dataset.key, Number(button.dataset.dir));
+        if (button.dataset.key === "bri") queueBrightness();
       } else if (button.dataset.action === "nudge") {
         nudgeEdit(button.dataset.group, button.dataset.id, button.dataset.field, Number(button.dataset.dir));
       } else if (button.dataset.action === "color-step") {
@@ -1165,6 +1637,9 @@
           range.dispatchEvent(new Event("input", { bubbles: true }));
           range.dispatchEvent(new Event("change", { bubbles: true }));
         }
+      } else if (repeatButton.dataset.action === "look-nudge") {
+        nudgeLook(repeatButton.dataset.key, Number(repeatButton.dataset.dir));
+        if (repeatButton.dataset.key === "bri") queueBrightness();
       } else if (repeatButton.dataset.action === "nudge") {
         nudgeEdit(repeatButton.dataset.group, repeatButton.dataset.id, repeatButton.dataset.field, Number(repeatButton.dataset.dir));
       } else if (repeatButton.dataset.action === "color-step") {
@@ -1178,13 +1653,64 @@
   root.addEventListener("change", onChange);
   root.addEventListener("input", onInput);
   root.addEventListener("pointerdown", (event) => {
+    const bright = event.target.closest("#look-range, [data-key='bri']");
+    if (bright && !state.holdingUndo) {
+      rememberUndo();
+      state.holdingUndo = true;
+    }
+    const handle = event.target.closest("[data-drag]");
+    if (handle) {
+      const board = ((state.control && state.control.devices) || []).find((item) => item.mac === handle.dataset.mac);
+      state.drag = {
+        mac: handle.dataset.mac,
+        name: board ? board.name : "Board",
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+        drop: null,
+      };
+      return;
+    }
     const button = event.target.closest("[data-repeat]");
     if (!button || button.disabled) return;
     event.preventDefault();
     repeated = false;
     startRepeat(button);
   });
-  window.addEventListener("pointerup", () => { clearInterval(repeat); repeat = 0; });
+  window.addEventListener("pointermove", (event) => {
+    if (!state.drag) return;
+    const dx = event.clientX - state.drag.x;
+    const dy = event.clientY - state.drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 12) state.drag.moved = true;
+    const ghost = document.getElementById("drag-ghost");
+    if (ghost && state.drag.moved) {
+      ghost.hidden = false;
+      ghost.textContent = state.drag.name;
+      ghost.style.left = (event.clientX + 8) + "px";
+      ghost.style.top = (event.clientY + 8) + "px";
+    }
+    const under = document.elementFromPoint(event.clientX, event.clientY);
+    const chip = under && under.closest("[data-drop-group]");
+    document.querySelectorAll("[data-drop-group]").forEach((node) => node.classList.toggle("drop", node === chip));
+    state.drag.drop = chip ? chip.dataset.dropGroup : null;
+  });
+  window.addEventListener("pointerup", () => {
+    clearInterval(repeat);
+    repeat = 0;
+    state.holdingUndo = false;
+    if (!state.drag) return;
+    const drag = state.drag;
+    state.drag = null;
+    const ghost = document.getElementById("drag-ghost");
+    if (ghost) ghost.hidden = true;
+    document.querySelectorAll(".drop").forEach((node) => node.classList.remove("drop"));
+    if (drag.moved && drag.drop) {
+      state.suppressClick = true;
+      api("/api/groups/" + drag.drop + "/members", { method: "POST", body: JSON.stringify({ mac: drag.mac }) })
+        .then(() => { toast("Added to the group"); return refreshControl(true); })
+        .catch((error) => toast(error.message));
+    }
+  });
   window.addEventListener("pointercancel", () => { clearInterval(repeat); repeat = 0; });
   window.addEventListener("hashchange", () => {
     state.sheet = null;
@@ -1213,8 +1739,12 @@
       try { await watchJob(await api("/api/jobs/" + saved)); await load(false); } catch (error) { sessionStorage.removeItem("fleet-job"); }
     }
     const tick = async () => {
-      if (!document.hidden) await refresh();
-      timer = setTimeout(tick, state.job ? 1000 : 5000);
+      if (!document.hidden) {
+        if (state.route.name === "control") await refreshControl(false);
+        else await refresh();
+      }
+      const wait = state.route.name === "control" ? 800 : (state.job ? 1000 : 5000);
+      timer = setTimeout(tick, wait);
     };
     timer = setTimeout(tick, 5000);
   }
@@ -1227,7 +1757,7 @@
   root.addEventListener("touchend", (event) => {
     if (touchX == null || touchX > 24) { touchX = null; return; }
     const end = event.changedTouches[0].clientX;
-    if (end - touchX > 80 && state.route.name !== "devices") history.back();
+    if (end - touchX > 80 && ["device", "backup", "diff"].includes(state.route.name)) history.back();
     touchX = null;
   }, { passive: true });
 

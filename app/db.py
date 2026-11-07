@@ -91,6 +91,28 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS groups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  sync INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS group_members (
+  group_id INTEGER NOT NULL REFERENCES groups(id) ON DELETE CASCADE,
+  mac TEXT NOT NULL,
+  position INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (group_id, mac)
+);
+
+CREATE TABLE IF NOT EXISTS scenes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  look_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 """
 
 
@@ -405,3 +427,98 @@ class Database:
 
     def setting_map(self) -> dict[str, str]:
         return {row["key"]: row["value"] for row in self._all("SELECT key, value FROM settings")}
+
+    def list_groups(self) -> list[dict]:
+        groups = self._all("SELECT * FROM groups ORDER BY position, id")
+        members = self._all("SELECT * FROM group_members ORDER BY position, mac")
+        by_id = {group["id"]: group for group in groups}
+        for group in groups:
+            group["macs"] = []
+            group["sync"] = bool(group["sync"])
+        for member in members:
+            group = by_id.get(member["group_id"])
+            if group is not None:
+                group["macs"].append(member["mac"])
+        return groups
+
+    def get_group(self, group_id: int) -> dict | None:
+        for group in self.list_groups():
+            if group["id"] == group_id:
+                return group
+        return None
+
+    def groups_for_mac(self, mac: str) -> list[int]:
+        rows = self._all("SELECT group_id FROM group_members WHERE mac=? ORDER BY group_id", (mac,))
+        return [row["group_id"] for row in rows]
+
+    def create_group(self, name: str) -> dict:
+        count = self._one("SELECT COUNT(*) AS n FROM groups")
+        position = int(count["n"] if count else 0)
+        group_id = self._run(
+            "INSERT INTO groups (name, position, sync, created_at) VALUES (?, ?, 0, ?)",
+            (name, position, utcnow()),
+        )
+        created = self.get_group(group_id)
+        assert created is not None
+        return created
+
+    def rename_group(self, group_id: int, name: str) -> None:
+        self._run("UPDATE groups SET name=? WHERE id=?", (name, group_id))
+
+    def set_group_sync(self, group_id: int, enabled: bool) -> None:
+        self._run("UPDATE groups SET sync=? WHERE id=?", (1 if enabled else 0, group_id))
+
+    def delete_group(self, group_id: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            self._conn.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            self._conn.commit()
+
+    def set_group_members(self, group_id: int, macs: list[str]) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            for position, mac in enumerate(macs):
+                self._conn.execute(
+                    "INSERT INTO group_members (group_id, mac, position) VALUES (?, ?, ?)",
+                    (group_id, mac, position),
+                )
+            self._conn.commit()
+
+    def add_group_member(self, group_id: int, mac: str) -> None:
+        group = self.get_group(group_id)
+        if group is None or mac in group["macs"]:
+            return
+        self._run(
+            "INSERT INTO group_members (group_id, mac, position) VALUES (?, ?, ?)",
+            (group_id, mac, len(group["macs"])),
+        )
+
+    def remove_group_member(self, group_id: int, mac: str) -> None:
+        self._run("DELETE FROM group_members WHERE group_id=? AND mac=?", (group_id, mac))
+
+    def list_scenes(self) -> list[dict]:
+        rows = self._all("SELECT * FROM scenes ORDER BY id DESC")
+        for row in rows:
+            try:
+                row["look"] = json.loads(row["look_json"])
+            except json.JSONDecodeError:
+                row["look"] = {}
+        return rows
+
+    def get_scene(self, scene_id: int) -> dict | None:
+        for scene in self.list_scenes():
+            if scene["id"] == scene_id:
+                return scene
+        return None
+
+    def create_scene(self, name: str, look: dict) -> dict:
+        scene_id = self._run(
+            "INSERT INTO scenes (name, look_json, created_at) VALUES (?, ?, ?)",
+            (name, json.dumps(look, separators=(",", ":")), utcnow()),
+        )
+        created = self.get_scene(scene_id)
+        assert created is not None
+        return created
+
+    def delete_scene(self, scene_id: int) -> None:
+        self._run("DELETE FROM scenes WHERE id=?", (scene_id,))

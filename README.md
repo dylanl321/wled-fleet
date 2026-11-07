@@ -2,7 +2,9 @@
 
 WLED Fleet keeps a house full of [WLED](https://kno.wled.ge) controllers backed up and reachable from a phone. It runs unattended on the LAN, finds controllers by itself, stores their config and presets, and flashes firmware only when you tell it to.
 
-The phone UI is the whole product: a bottom tab bar, large controls, and a home-screen install. Open it from the phone that is already on the same Wi-Fi as the lights.
+The phone UI is the whole product. Control is the first page: pick a group (or leave it on All) and tap Warm, Night, Bright, or Rainbow to send that look to every board. Turn on, turn off, and Back up are the same kind of single tap. Undo puts the previous look back. Effect, palette, speed, and groups live under More.
+
+![Control, with both boards and the looks in reach of a thumb](docs/screenshots/phone-control.png)
 
 ## What it does
 

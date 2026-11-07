@@ -74,14 +74,17 @@ class WledClient:
             raise
 
     async def get_json(self, device: dict, path: str, timeout: float = 8.0) -> dict:
-        response = await self._request("GET", device, path, timeout=httpx.Timeout(timeout, connect=2.0))
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise WledError(f"Controller returned non-JSON for {path}.") from exc
+        data = await self.get_json_any(device, path, timeout)
         if not isinstance(data, dict):
             raise WledError(f"Controller returned an unexpected document for {path}.")
         return data
+
+    async def get_json_any(self, device: dict, path: str, timeout: float = 8.0) -> object:
+        response = await self._request("GET", device, path, timeout=httpx.Timeout(timeout, connect=2.0))
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise WledError(f"Controller returned non-JSON for {path}.") from exc
 
     async def post_json(self, device: dict, path: str, payload: dict, timeout: float = 12.0) -> dict:
         response = await self._request(

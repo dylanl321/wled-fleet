@@ -15,25 +15,34 @@ from fastapi.staticfiles import StaticFiles
 
 from app.auth import issue_session, password_ok, session_valid
 from app.config import Settings
+from app.control import apply_look, set_sync, snapshot
 from app.db import Database
 from app.diffutil import json_diff, mask_secrets
 from app.discovery import normalize_mac
 from app.errors import FleetError
 from app.fleet import Fleet
+from app.util import clean_name
 from app.schemas import (
+    ApplyIn,
     BinAssignIn,
     CheckIn,
     ColorIn,
     FetchIn,
     FirmwareJobIn,
     FlagIn,
+    GroupIn,
     LedsIn,
     LoginIn,
     MacsIn,
+    MemberIn,
+    MembersIn,
     ProfileAssignIn,
     ProfileIn,
     RenameIn,
+    SceneApplyIn,
+    SceneIn,
     SecretsIn,
+    SyncIn,
     SegmentsIn,
     SettingsIn,
     StateIn,
@@ -512,6 +521,124 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "presence_interval": runtime.presence_interval,
             "sources": runtime.sources,
         }
+
+    @app.get("/api/control")
+    async def control(request: Request, group: int | None = None) -> dict:
+        return await snapshot(fleet_of(request), group)
+
+    @app.post("/api/control/apply")
+    async def control_apply(body: ApplyIn, request: Request) -> dict:
+        macs = _macs(request, body.macs)
+        results = await apply_look(fleet_of(request), macs, body.look.model_dump(exclude_none=True), body.sync)
+        return {"results": results}
+
+    @app.get("/api/groups")
+    async def groups(request: Request) -> list[dict]:
+        return fleet_of(request).db.list_groups()
+
+    @app.post("/api/groups")
+    async def create_group(body: GroupIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a group name.")
+        group = fleet_of(request).db.create_group(name)
+        fleet_of(request).event("info", "group.create", f"Created group {name}")
+        return group
+
+    @app.patch("/api/groups/{group_id}")
+    async def rename_group(group_id: int, body: GroupIn, request: Request) -> dict:
+        fleet = fleet_of(request)
+        if fleet.db.get_group(group_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown group")
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a group name.")
+        fleet.db.rename_group(group_id, name)
+        updated = fleet.db.get_group(group_id)
+        assert updated is not None
+        return updated
+
+    @app.delete("/api/groups/{group_id}")
+    async def delete_group(group_id: int, request: Request) -> dict:
+        fleet = fleet_of(request)
+        group = fleet.db.get_group(group_id)
+        if group is None:
+            raise HTTPException(status_code=404, detail="Unknown group")
+        fleet.db.delete_group(group_id)
+        fleet.event("info", "group.delete", f"Deleted group {group['name']}")
+        return {"ok": True}
+
+    @app.put("/api/groups/{group_id}/members")
+    async def set_members(group_id: int, body: MembersIn, request: Request) -> dict:
+        fleet = fleet_of(request)
+        if fleet.db.get_group(group_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown group")
+        fleet.db.set_group_members(group_id, _macs(request, body.macs) if body.macs else [])
+        updated = fleet.db.get_group(group_id)
+        assert updated is not None
+        return updated
+
+    @app.post("/api/groups/{group_id}/members")
+    async def add_member(group_id: int, body: MemberIn, request: Request) -> dict:
+        fleet = fleet_of(request)
+        if fleet.db.get_group(group_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown group")
+        mac = _macs(request, [body.mac])[0]
+        fleet.db.add_group_member(group_id, mac)
+        updated = fleet.db.get_group(group_id)
+        assert updated is not None
+        return updated
+
+    @app.delete("/api/groups/{group_id}/members/{mac}")
+    async def remove_member(group_id: int, mac: str, request: Request) -> dict:
+        fleet = fleet_of(request)
+        if fleet.db.get_group(group_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown group")
+        normalized = _macs(request, [mac])[0]
+        fleet.db.remove_group_member(group_id, normalized)
+        updated = fleet.db.get_group(group_id)
+        assert updated is not None
+        return updated
+
+    @app.post("/api/groups/{group_id}/sync")
+    async def group_sync(group_id: int, body: SyncIn, request: Request) -> dict:
+        return await set_sync(fleet_of(request), group_id, body.enabled)
+
+    @app.get("/api/scenes")
+    async def scenes(request: Request) -> list[dict]:
+        return fleet_of(request).db.list_scenes()
+
+    @app.post("/api/scenes")
+    async def create_scene(body: SceneIn, request: Request) -> dict:
+        name = clean_name(body.name)
+        if not name:
+            raise HTTPException(status_code=400, detail="Enter a scene name.")
+        scene = fleet_of(request).db.create_scene(name, body.look.model_dump(exclude_none=True))
+        fleet_of(request).event("info", "scene.create", f"Saved scene {name}")
+        return scene
+
+    @app.delete("/api/scenes/{scene_id}")
+    async def delete_scene(scene_id: int, request: Request) -> dict:
+        fleet = fleet_of(request)
+        if fleet.db.get_scene(scene_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown scene")
+        fleet.db.delete_scene(scene_id)
+        return {"ok": True}
+
+    @app.post("/api/scenes/{scene_id}/apply")
+    async def apply_scene(scene_id: int, body: SceneApplyIn, request: Request) -> dict:
+        fleet = fleet_of(request)
+        scene = fleet.db.get_scene(scene_id)
+        if scene is None:
+            raise HTTPException(status_code=404, detail="Unknown scene")
+        macs = list(body.macs)
+        if body.group_id is not None:
+            group = fleet.db.get_group(body.group_id)
+            if group is None:
+                raise HTTPException(status_code=404, detail="Unknown group")
+            macs = group["macs"]
+        results = await apply_look(fleet, _macs(request, macs), scene["look"], body.sync)
+        return {"results": results}
 
     if (STATIC).exists():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")

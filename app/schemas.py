@@ -108,3 +108,48 @@ class SettingsIn(BaseModel):
     discovery_interval: int | None = None
     presence_interval: int | None = None
     reset: bool = False
+
+
+class LookIn(BaseModel):
+    on: bool | None = None
+    bri: int | None = Field(default=None, ge=0, le=255)
+    col: list[list[int]] | None = None
+    fx: int | None = Field(default=None, ge=0, le=255)
+    pal: int | None = Field(default=None, ge=0, le=255)
+    sx: int | None = Field(default=None, ge=0, le=255)
+    ix: int | None = Field(default=None, ge=0, le=255)
+    ps: int | None = None
+    tt: int | None = Field(default=None, ge=0, le=255)
+
+
+class ApplyIn(BaseModel):
+    macs: list[str] = Field(min_length=1, max_length=100)
+    look: LookIn
+    sync: bool = False
+
+
+class GroupIn(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+
+
+class MembersIn(BaseModel):
+    macs: list[str] = Field(max_length=100)
+
+
+class MemberIn(BaseModel):
+    mac: str
+
+
+class SceneIn(BaseModel):
+    name: str = Field(min_length=1, max_length=32)
+    look: LookIn
+
+
+class SceneApplyIn(BaseModel):
+    macs: list[str] = Field(default_factory=list, max_length=100)
+    group_id: int | None = None
+    sync: bool = False
+
+
+class SyncIn(BaseModel):
+    enabled: bool
