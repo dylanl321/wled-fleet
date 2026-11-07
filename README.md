@@ -2,9 +2,9 @@
 
 WLED Fleet keeps a house full of [WLED](https://kno.wled.ge) controllers backed up and reachable from a phone. It runs unattended on the LAN, finds controllers by itself, stores their config and presets, and flashes firmware only when you tell it to.
 
-The phone UI is the whole product. Control is the first page: pick a group (or leave it on All) and tap Warm, Night, Bright, or Rainbow to send that look to every board. Turn on, turn off, and Back up are the same kind of single tap. Undo puts the previous look back. Effect, palette, speed, and groups live under More.
+The phone UI is Lumen. Home is a list of live ribbons, one per light, grouped into zones. Tap a ribbon and Paint opens over it: a tray of Looks you can scrub onto the real strips, plus brightness. Find counts LEDs on a ruler. Maintenance is the only place a board shows up. There is no tab bar.
 
-![Control, with both boards and the looks in reach of a thumb](docs/screenshots/phone-control.png)
+A preview image is published from the `lumen` branch as `ghcr.io/dylanl321/wled-fleet:lumen`. It does not move `:latest`. On TrueNAS, change the image tag to `lumen` to try it, and leave the data volume where it is. Existing controllers and backups are kept; groups become zones and each output becomes a light.
 
 ## What it does
 

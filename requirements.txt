@@ -3,3 +3,4 @@ uvicorn==0.34.0
 httpx==0.28.1
 zeroconf==0.144.1
 python-multipart==0.0.20
+websockets==14.1
