@@ -451,16 +451,36 @@ class Database:
         rows = self._all("SELECT group_id FROM group_members WHERE mac=? ORDER BY group_id", (mac,))
         return [row["group_id"] for row in rows]
 
-    def create_group(self, name: str) -> dict:
-        count = self._one("SELECT COUNT(*) AS n FROM groups")
-        position = int(count["n"] if count else 0)
-        group_id = self._run(
-            "INSERT INTO groups (name, position, sync, created_at) VALUES (?, ?, 0, ?)",
-            (name, position, utcnow()),
-        )
+    def create_group(self, name: str, macs: list[str] | None = None) -> dict:
+        with self._lock, self._conn:
+            count = self._conn.execute("SELECT COUNT(*) AS n FROM groups").fetchone()
+            position = int(count["n"] if count else 0)
+            cursor = self._conn.execute(
+                "INSERT INTO groups (name, position, sync, created_at) VALUES (?, ?, 0, ?)",
+                (name, position, utcnow()),
+            )
+            group_id = int(cursor.lastrowid)
+            for member_position, mac in enumerate(macs or []):
+                self._conn.execute(
+                    "INSERT INTO group_members (group_id, mac, position) VALUES (?, ?, ?)",
+                    (group_id, mac, member_position),
+                )
         created = self.get_group(group_id)
         assert created is not None
         return created
+
+    def update_group(self, group_id: int, name: str, macs: list[str]) -> dict:
+        with self._lock, self._conn:
+            self._conn.execute("UPDATE groups SET name=? WHERE id=?", (name, group_id))
+            self._conn.execute("DELETE FROM group_members WHERE group_id=?", (group_id,))
+            for position, mac in enumerate(macs):
+                self._conn.execute(
+                    "INSERT INTO group_members (group_id, mac, position) VALUES (?, ?, ?)",
+                    (group_id, mac, position),
+                )
+        updated = self.get_group(group_id)
+        assert updated is not None
+        return updated
 
     def rename_group(self, group_id: int, name: str) -> None:
         self._run("UPDATE groups SET name=? WHERE id=?", (name, group_id))

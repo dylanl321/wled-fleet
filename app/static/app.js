@@ -25,6 +25,7 @@
     settings: null,
     route: { name: "devices" },
     sheet: null,
+    sheetReturn: null,
     pending: null,
     edits: null,
     draftColor: { r: 255, g: 170, b: 70 },
@@ -32,13 +33,12 @@
     groupId: null,
     picked: {},
     look: { on: true, bri: 180, col: [[255, 170, 70], [40, 8, 0], [0, 0, 0]], fx: 0, pal: 0, sx: 128, ix: 128 },
+    lookCurrent: true,
     skipped: {},
     undo: null,
     holdingUndo: false,
     colorSlot: 0,
     applyMarks: {},
-    drag: null,
-    suppressClick: false,
     selecting: false,
     selected: {},
     showForgotten: false,
@@ -57,12 +57,15 @@
     sections: null,
     sectionTimer: 0,
     lastLook: "",
+    groupDraft: null,
   };
   hydrateUi();
   if (state.control || state.devices.length) state.booting = false;
   let timer = 0;
   let repeat = 0;
   let repeated = false;
+  let loadGeneration = 0;
+  let controlGeneration = 0;
 
   function hydrateUi() {
     try {
@@ -110,6 +113,25 @@
     if (parts[0] === "backup" && parts[2]) return { name: "backup", mac: parts[1], id: parts[2] };
     if (parts[0] === "diff" && parts[2]) return { name: "diff", mac: parts[1], id: parts[2] };
     return { name: "devices" };
+  }
+
+  function clearRouteState(route) {
+    if (route.name === "device") {
+      state.live = null;
+      state.backups = [];
+    } else if (route.name === "backup") {
+      state.backup = null;
+    } else if (route.name === "diff") {
+      state.diff = null;
+    } else if (route.name === "firmware") {
+      state.bins = [];
+      state.profiles = [];
+      state.releases = [];
+    } else if (route.name === "events") {
+      state.events = [];
+    } else if (route.name === "settings") {
+      state.settings = null;
+    }
   }
 
   function ago(iso) {
@@ -215,17 +237,55 @@
     return !(el && ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName));
   }
 
+  function focusAction(reference) {
+    state.sheetReturn = null;
+    if (!reference || !reference.action) return;
+    setTimeout(() => {
+      const openers = document.querySelectorAll('[data-action="' + reference.action + '"]');
+      const opener = openers[reference.index];
+      if (opener) opener.focus();
+    });
+  }
+
   function render(options) {
     const main = document.querySelector("main");
     const y = options && options.resetScroll ? 0 : (main ? main.scrollTop : 0);
+    const hadSheet = document.body.classList.contains("sheet-open");
+    if (state.sheet && !hadSheet) {
+      const active = document.activeElement;
+      const action = active && active.dataset ? active.dataset.action : null;
+      if (action) {
+        const openers = Array.from(document.querySelectorAll('[data-action="' + action + '"]'));
+        state.sheetReturn = { action, index: openers.indexOf(active) };
+      } else {
+        state.sheetReturn = null;
+      }
+    }
+    const restoreAction = hadSheet && !state.sheet ? state.sheetReturn : null;
     root.innerHTML = shell();
     const next = document.querySelector("main");
-    if (next) next.scrollTop = y;
+    if (next) {
+      next.scrollTop = y;
+      if (options && options.transition) next.classList.add("view-enter");
+    }
     document.body.classList.toggle("sheet-open", Boolean(state.sheet));
+    root.querySelectorAll(":scope > :not(.sheet):not(.backdrop)").forEach((node) => {
+      node.inert = Boolean(state.sheet);
+    });
     const deviceDock = state.route.name === "device" && !!(state.live && state.live.state);
     document.body.classList.toggle("has-dock", deviceDock || state.route.name === "control");
     document.body.classList.toggle("has-control", state.route.name === "control");
     paintLeds();
+    if (state.sheet) {
+      setTimeout(() => {
+        const sheet = document.querySelector(".sheet");
+        if (!sheet || sheet.contains(document.activeElement)) return;
+        const first = sheet.querySelector("[autofocus], input, button:not(.backdrop)");
+        if (first) first.focus();
+      });
+    } else if (restoreAction) {
+      focusAction(restoreAction);
+    }
   }
 
   function shell() {
@@ -357,12 +417,19 @@
     const data = state.control;
     if (!data) return '<div class="groups"><span class="chip on">All</span></div><article class="strip"></article><article class="strip"></article>';
     const groups = data.groups || [];
-    const chips = '<button type="button" class="chip' + (state.groupId == null ? " on" : "") + '" data-action="use-group" data-id="">All</button>' +
-      groups.map((group) => '<button type="button" class="chip' + (Number(state.groupId) === group.id ? " on" : "") + '" data-action="use-group" data-id="' + group.id + '">' + esc(group.name) + "</button>").join("") +
-      '<button type="button" class="chip" data-action="new-group" aria-label="New group">+</button>';
-    const boards = (data.devices || []).map((device) => stripCard(device)).join("");
-    return '<div class="groups">' + chips + "</div>" + legendHtml() +
-      (boards || '<section class="card"><h2>No boards yet</h2><p class="meta">They show up here on their own once they join the network.</p></section>');
+    const selectedGroup = groups.find((group) => Number(state.groupId) === Number(group.id));
+    const chips = '<button type="button" class="chip' + (state.groupId == null ? " on" : "") + '" data-action="use-group" data-id="" aria-pressed="' + (state.groupId == null) + '">All</button>' +
+      groups.map((group) => '<button type="button" class="chip' + (Number(state.groupId) === group.id ? " on" : "") + '" data-action="use-group" data-id="' + group.id + '" aria-pressed="' + (Number(state.groupId) === group.id) + '">' + esc(group.name) + "</button>").join("") +
+      '<button type="button" class="chip add-group" data-action="new-group">+ Group</button>';
+    const groupEdit = selectedGroup
+      ? '<button type="button" class="scope-edit" data-action="edit-group">Edit group</button>'
+      : "";
+    const devices = data.devices || [];
+    const included = devices.filter((device) => device.online && !state.skipped[device.mac]).length;
+    const boards = devices.map((device) => stripCard(device)).join("");
+    return '<section class="scope"><div class="groups">' + chips + '</div>' + groupEdit +
+      '<p class="scope-summary">' + included + " of " + devices.length + " controllers included</p></section>" + legendHtml() +
+      (boards || '<section class="card"><h2>No boards in this group</h2><p class="meta">Edit the group to choose controllers.</p></section>');
   }
 
   function nameField(device, where) {
@@ -376,15 +443,12 @@
     const skipped = state.skipped[device.mac] ? " skipped" : "";
     const mark = state.applyMarks[device.mac];
     const markHtml = mark && !mark.ok ? '<span class="pill bad">' + esc(mark.error) + "</span>" : "";
-    const anySkipped = Object.keys(state.skipped).length > 0;
-    const included = !state.skipped[device.mac];
-    const tick = included && (anySkipped || state.justSelected === device.mac)
-      ? '<span class="tick' + (state.justSelected === device.mac ? " pop" : "") + '" aria-hidden="true">✓</span>'
-      : "";
-    const status = device.online ? (state.skipped[device.mac] ? "Left out" : (device.on ? "On" : "Off")) : "Offline";
-    return '<article class="strip' + skipped + (device.online ? "" : " off") + '" data-action="pick-board" data-mac="' + esc(device.mac) + '">' +
-      '<div class="strip-head"><span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' +
-      status + "</span>" + tick + nameField(device, "control") + markHtml +
+    const included = device.online && !state.skipped[device.mac];
+    const status = device.online ? (included ? (device.on ? "On" : "Off") : "Left out") : "Offline";
+    return '<article class="strip' + skipped + (device.online ? "" : " off") + '" data-mac="' + esc(device.mac) + '">' +
+      '<div class="strip-head"><button type="button" class="include" data-action="pick-board" data-mac="' + esc(device.mac) + '" aria-pressed="' + included + '" aria-label="' + (device.online ? (included ? "Exclude " : "Include ") + esc(device.name) : esc(device.name) + " is offline") + '"' + (device.online ? "" : " disabled") + '>' + (device.online ? (included ? "✓" : "+") : "—") + "</button>" +
+      '<span class="status"><span class="dot ' + (device.online && device.on ? "on" : "off") + '"></span>' + status + "</span>" +
+      nameField(device, "control") + markHtml +
       '<button type="button" class="flash" data-action="flash" data-mac="' + esc(device.mac) + '"' + (device.online ? "" : " disabled") + ' aria-label="Flash ' + esc(device.name) + '">Flash</button></div>' +
       '<canvas data-mac="' + compact(device.mac) + '" aria-label="' + esc(device.name) + ' colors"></canvas>' +
       '<p class="meta" data-meta="' + compact(device.mac) + '">' + esc(device.effect || "") + "</p></article>";
@@ -393,36 +457,34 @@
   function legendHtml() {
     const sections = state.sections;
     if (!sections) return "";
-    if (sections.pending) return '<p class="legend">Marking every ' + Number(sections.every) + " LEDs…</p>";
-    return (sections.devices || []).map((device) => {
+    if (sections.pending) return '<section class="legend"><strong>Identifying LED sections…</strong><p class="meta">Placing a marker every ' + Number(sections.every) + " LEDs.</p></section>";
+    const devices = (sections.devices || []).map((device) => {
       const rows = (device.outputs || []).map((output) => {
         const pin = output.pin == null ? "" : " · pin " + output.pin;
         return '<li><i style="background:' + cssColor(output.color) + '"></i><span>Output ' + output.output + pin + " · " + output.leds + " LEDs</span></li>";
       }).join("");
-      return '<section class="legend"><div class="legend-head"><strong>' + esc(device.name) + '</strong><button type="button" class="btn tiny" data-action="sections-done">Done</button></div><ul>' +
-        rows + '</ul><p class="meta">Every ' + Number(sections.every) + " LEDs. Restores on its own.</p></section>";
+      return '<div class="legend-device"><strong>' + esc(device.name) + "</strong><ul>" + rows + "</ul></div>";
     }).join("");
+    return '<section class="legend"><div class="legend-head"><div><strong>Sections active</strong><p class="meta">Every ' + Number(sections.every) + " LEDs · restores automatically</p></div>" +
+      '<button type="button" class="btn tiny" data-action="sections-done">Restore now</button></div>' + devices + "</section>";
   }
 
   function controlDock() {
-    const scenes = ((state.control && state.control.scenes) || []).map((scene) =>
-      '<button type="button" class="look" data-action="play-scene" data-id="' + scene.id + '"><span>' + esc(scene.name) + "</span></button>"
-    ).join("");
+    const savedCount = ((state.control && state.control.scenes) || []).length;
     const looks = LOOKS.map((look) =>
       '<button type="button" class="look' + (state.lastLook === look.name ? " chose" : "") + '" data-action="quick-look" data-name="' + esc(look.name) + '"><i style="background:' + cssColor(look.swatch) + '"></i><span>' + esc(look.name) + "</span></button>"
     ).join("");
     const on = groupIsOn();
-    const sectionAction = state.sections
-      ? '<button class="btn tiny" type="button" data-action="sections-done">Done</button>'
-      : '<button class="btn tiny ghost" type="button" data-action="sections">Sections</button>';
     return '<div class="dock composer">' +
-      '<div class="looks">' + looks + scenes + "</div>" +
+      '<div class="dock-label"><span>Looks</span><button type="button" data-action="saved-looks">Saved' + (savedCount ? " · " + savedCount : "") + "</button></div>" +
+      '<div class="looks">' + looks + "</div>" +
+      '<div class="readout"><span>Brightness</span><span>' + Math.round(Number(state.look.bri) / 255 * 100) + "%</span></div>" +
       '<div class="slider"><button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="-20" aria-label="Dimmer">−</button>' +
       '<input id="look-range" type="range" min="0" max="255" value="' + state.look.bri + '" aria-label="Brightness">' +
       '<button class="step" type="button" data-repeat data-action="look-nudge" data-key="bri" data-dir="20" aria-label="Brighter">+</button></div>' +
       '<button class="btn ' + (on ? "primary" : "ghost") + '" type="button" data-action="group-power">' + (on ? "Turn off" : "Turn on") + "</button>" +
-      '<div class="grid2">' + sectionAction +
-      '<button class="btn tiny ghost" type="button" data-action="more">More</button></div>' +
+      '<div class="grid2"><button class="btn tiny ghost" type="button" data-action="customize">Customize</button>' +
+      '<button class="btn tiny ghost" type="button" data-action="tools">Tools</button></div>' +
       (state.undo ? '<button class="btn ghost" type="button" data-action="undo">Undo</button>' : "") +
       "</div>";
   }
@@ -472,9 +534,12 @@
 
   async function refreshControl(forceRender) {
     if (state.route.name !== "control") return;
+    const requestId = ++controlGeneration;
+    const groupId = state.groupId;
     try {
-      const query = state.groupId ? "?group=" + state.groupId : "";
+      const query = groupId ? "?group=" + groupId : "";
       const data = await api("/api/control" + query);
+      if (requestId !== controlGeneration || state.route.name !== "control" || state.groupId !== groupId) return;
       const previous = state.control && state.control.devices ? state.control.devices.map((device) => device.mac).join() : "";
       const next = data.devices.map((device) => device.mac).join();
       applyFlashOverlay(data);
@@ -488,6 +553,7 @@
         updateStripMeta();
       }
     } catch (error) {
+      if (requestId !== controlGeneration || state.route.name !== "control" || state.groupId !== groupId) return;
       if (error.message !== "Sign in required" && !state.control) state.error = error.message;
     }
   }
@@ -599,14 +665,53 @@
     updateStripMeta();
   }
 
+  function applyLookToComposer(look) {
+    if (!look || typeof look !== "object") return false;
+    ["on", "bri", "fx", "pal", "sx", "ix"].forEach((key) => {
+      if (look[key] != null) state.look[key] = key === "on" ? Boolean(look[key]) : Number(look[key]);
+    });
+    if (Array.isArray(look.col)) state.look.col = look.col.map((color) => color.slice());
+    state.lookCurrent = true;
+    return true;
+  }
+
+  function lookFromWledState(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    const segment = Array.isArray(raw.seg) && raw.seg.length ? raw.seg[0] : {};
+    return {
+      on: raw.on,
+      bri: raw.bri,
+      col: segment.col,
+      fx: segment.fx,
+      pal: segment.pal,
+      sx: segment.sx,
+      ix: segment.ix,
+    };
+  }
+
+  function currentLook() {
+    return {
+      on: Boolean(state.look.on),
+      bri: Number(state.look.bri),
+      col: state.look.col.map((color) => color.slice()),
+      fx: Number(state.look.fx),
+      pal: Number(state.look.pal),
+      sx: Number(state.look.sx),
+      ix: Number(state.look.ix),
+    };
+  }
+
   async function pushLook(action, id, lookOverride) {
     const macs = targetMacs();
     if (!macs.length) throw new Error("Every board here is left out. Tap one to include it.");
     const before = copyBoards(macs);
     if (action === "play-scene") {
+      const scene = ((state.control && state.control.scenes) || []).find((item) => Number(item.id) === Number(id));
       rememberUndo();
       try {
         const results = await api("/api/scenes/" + id + "/apply", { method: "POST", body: JSON.stringify({ macs, sync: false }) });
+        const applied = (results.results || []).some((row) => row.ok);
+        if (scene && applied) applyLookToComposer(scene.look);
         noteResults(results);
       } catch (error) {
         restoreBoards(before);
@@ -615,6 +720,8 @@
       return;
     }
     const look = action === "apply-preset" ? { ps: Number(id) } : (lookOverride || { on: true, bri: Number(state.look.bri) });
+    if (action === "direct" && lookOverride) applyLookToComposer(lookOverride);
+    if (action === "apply-preset") state.lookCurrent = false;
     rememberUndo();
     paintOptimistic(macs, look);
     const glow = look.col && look.col[0] ? look.col[0] : [255, 200, 80];
@@ -623,6 +730,17 @@
       const results = await api("/api/control/apply", { method: "POST", body: JSON.stringify({ macs, look, sync: false }) });
       const failed = (results.results || []).filter((row) => !row.ok).map((row) => row.mac);
       if (failed.length) restoreBoards(before.filter((copy) => failed.indexOf(copy.mac) >= 0));
+      if (action === "apply-preset") {
+        const first = (results.results || []).find((row) => row.ok);
+        if (first) {
+          try {
+            const live = await api("/api/devices/" + compact(first.mac) + "/live");
+            if (live && live.state) applyLookToComposer(lookFromWledState(live.state));
+          } catch (_) {
+            state.lookCurrent = false;
+          }
+        }
+      }
       noteResults(results);
     } catch (error) {
       restoreBoards(before);
@@ -924,9 +1042,12 @@
     if (sheet.kind === "color") return colorSheet();
     if (sheet.kind === "effects" || sheet.kind === "palettes") return choiceSheet();
     if (sheet.kind === "name") return nameSheet();
-    if (sheet.kind === "more") return moreSheet();
+    if (sheet.kind === "group") return groupSheet();
+    if (sheet.kind === "customize") return customizeSheet();
+    if (sheet.kind === "tools") return toolsSheet();
+    if (sheet.kind === "saved") return savedLooksSheet();
+    if (sheet.kind === "more") return customizeSheet();
     if (sheet.kind === "sections") return sectionsSheet();
-    if (sheet.kind === "boards") return boardsSheet();
     if (sheet.kind === "firmware") return firmwareSheet();
     if (sheet.kind === "secrets") return secretsSheet();
     if (sheet.kind === "results") return resultsSheet();
@@ -938,35 +1059,56 @@
       '</button><button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
   }
 
-  function moreSheet() {
-    const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
+  function customizeSheet() {
+    const effects = (state.control && state.control.effects) || [];
+    const palettes = (state.control && state.control.palettes) || [];
+    const effect = effects[Number(state.look.fx)] || "Solid";
+    const palette = palettes[Number(state.look.pal)] || "Default";
     const presets = ((state.control && state.control.presets) || []).map((preset) =>
-      '<button type="button" class="btn" data-action="apply-preset" data-id="' + preset.id + '">' + esc(preset.name) + "</button>"
+      '<button type="button" class="choice-card" data-action="apply-preset" data-id="' + preset.id + '"><span>' + esc(preset.name) + '</span><small>Preset ' + preset.id + "</small></button>"
     ).join("");
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="More"><h2>More</h2>' +
-      '<div class="grid2"><button type="button" class="btn" data-action="tune" data-dir="-40">Slower</button>' +
-      '<button type="button" class="btn" data-action="tune" data-dir="40">Faster</button></div>' +
-      '<button type="button" class="btn" data-action="open-effects">Effect</button>' +
-      '<button type="button" class="btn" data-action="open-palettes">Palette</button>' +
-      presets +
-      '<button type="button" class="btn" data-action="backup-all">Back up</button>' +
-      '<button type="button" class="btn" data-action="save-scene">Save this look</button>' +
-      (group ? '<button type="button" class="btn" data-action="edit-boards">Boards in ' + esc(group.name) + "</button>" : "") +
-      (group ? '<button type="button" class="btn ghost" data-action="rename-group">Rename group</button>' : "") +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Customize look"><div class="sheet-head"><div><p class="eyebrow">LOOK</p><h2>Customize look</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Done</button></div>' +
+      '<button type="button" class="menu-row" data-action="open-effects"><span><strong>Effect</strong><small>Animation style</small></span><b>' + esc(effect) + " ›</b></button>" +
+      '<button type="button" class="menu-row" data-action="open-palettes"><span><strong>Palette</strong><small>Color sequence</small></span><b>' + esc(palette) + " ›</b></button>" +
+      '<div class="tool-block"><div class="block-title"><span>Speed</span><strong data-look-readout="sx">' + Number(state.look.sx) + '</strong></div><div class="grid2"><button type="button" class="btn" data-action="tune" data-dir="-24">Slower</button><button type="button" class="btn" data-action="tune" data-dir="24">Faster</button></div></div>' +
+      '<div class="tool-block"><div class="block-title"><span>Controller presets</span></div><p class="meta">Preset numbers can behave differently across controller firmware.</p><div class="choice-grid">' +
+      (presets || '<p class="meta">No controller presets available.</p>') + "</div></div>" +
+      '<button type="button" class="btn" data-action="saved-looks">Saved looks</button>' +
+      '<button type="button" class="btn primary" data-action="save-scene"' + (state.lookCurrent ? "" : " disabled") + '>' +
+      (state.lookCurrent ? "Save current look" : "Current look unavailable") + "</button></div>";
   }
 
-  function boardsSheet() {
-    const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
-    const members = group ? group.macs : [];
-    const rows = state.devices.filter((device) => !device.forgotten).map((device) =>
-      '<label class="check"><input type="checkbox" data-action="member" data-group="' + state.groupId + '" data-mac="' + esc(device.mac) + '"' +
-      (members.indexOf(device.mac) >= 0 ? " checked" : "") + "> " + esc(device.name) + "</label>"
+  function toolsSheet() {
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Tools"><div class="sheet-head"><div><p class="eyebrow">CONTROL</p><h2>Tools</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Done</button></div>' +
+      '<button type="button" class="menu-row" data-action="sections"><span><strong>Identify LED sections</strong><small>Temporarily mark outputs and spacing</small></span><b>›</b></button>' +
+      '<button type="button" class="menu-row" data-action="backup-all"><span><strong>Back up all controllers</strong><small>Saves every online controller</small></span><b>›</b></button></div>';
+  }
+
+  function savedLooksSheet() {
+    const scenes = ((state.control && state.control.scenes) || []).map((scene) =>
+      '<button type="button" class="choice-card" data-action="play-scene" data-id="' + scene.id + '"><span>' + esc(scene.name) + "</span><small>Saved look</small></button>"
     ).join("");
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Boards"><h2>' + esc(group ? group.name : "Boards") + "</h2>" +
-      rows + '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Saved looks"><div class="sheet-head"><div><p class="eyebrow">LOOKS</p><h2>Saved looks</h2></div><button class="sheet-close" type="button" data-action="customize">Back</button></div>' +
+      '<div class="choice-grid">' + (scenes || '<p class="meta">Save a look to reuse it here.</p>') + "</div></div>";
+  }
+
+  function groupSheet() {
+    const draft = state.groupDraft || { id: null, name: "", members: {} };
+    const rows = state.devices.filter((device) => !device.forgotten).map((device) =>
+      '<label class="member-row"><input type="checkbox" data-action="group-member" data-mac="' + esc(device.mac) + '"' +
+      (draft.members[device.mac] ? " checked" : "") + '><span><strong>' + esc(device.name) + '</strong><small>' + esc(device.ip) + "</small></span></label>"
+    ).join("");
+    const editing = draft.id != null;
+    return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Group settings"><div class="sheet-head"><div><p class="eyebrow">SCOPE</p><h2>' + (editing ? "Edit group" : "New group") + '</h2></div><button class="sheet-close" type="button" data-action="close-sheet">Cancel</button></div>' +
+      '<label class="field"><span>Group name</span><input id="group-name" type="text" maxlength="32" value="' + esc(draft.name) + '"></label>' +
+      '<div class="block-title"><span>Controllers</span><strong>' + Object.keys(draft.members).filter((mac) => draft.members[mac]).length + " selected</strong></div>" +
+      '<div class="member-list">' + rows + "</div>" +
+      '<button class="btn primary" type="button" data-action="save-group">' + (editing ? "Save group" : "Create group") + "</button>" +
+      (editing ? '<button class="btn danger" type="button" data-action="delete-group">Delete group</button>' : "") + "</div>";
   }
 
   function choiceSheet() {
@@ -974,26 +1116,26 @@
     const items = kind === "effects" ? ((state.control && state.control.effects) || []) : ((state.control && state.control.palettes) || []);
     const action = kind === "effects" ? "pick-effect" : "pick-palette";
     const current = kind === "effects" ? state.look.fx : state.look.pal;
+    const title = kind === "effects" ? "Effects" : "Palettes";
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="' + (kind === "effects" ? "Effect" : "Palette") + '"><h2>' +
-      (kind === "effects" ? "Effect" : "Palette") + "</h2>" +
-      (items.length ? items.map((name, index) =>
-        '<button type="button" class="rowbtn rise-in' + (index === current ? " on" : "") + '" style="animation-delay:' + Math.min(index, 12) * 16 + 'ms" data-action="' + action + '" data-id="' + index + '">' + esc(name) + "</button>"
-      ).join("") : "<p>This controller did not send a list. The number still applies.</p>") +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+      '<div class="sheet choice-sheet" role="dialog" aria-modal="true" aria-label="' + title + '"><div class="sheet-head sticky"><div><p class="eyebrow">CUSTOMIZE</p><h2>' + title + '</h2></div><button class="sheet-close" type="button" data-action="customize">Back</button></div>' +
+      '<input class="choice-search" id="choice-filter" type="search" placeholder="Search ' + title.toLowerCase() + '" aria-label="Search ' + title.toLowerCase() + '">' +
+      '<div class="choice-list">' + (items.length ? items.map((name, index) =>
+        '<button type="button" class="rowbtn' + (index === current ? " on" : "") + '" data-choice="' + esc(String(name).toLowerCase()) + '" data-action="' + action + '" data-id="' + index + '"><span>' + (index === current ? "✓ " : "") + esc(name) + "</span></button>"
+      ).join("") : "<p>This controller did not send a list. The number still applies.</p>") + "</div></div>";
   }
 
   function sectionsSheet() {
+    const count = targetMacs().length;
     return '<button class="backdrop" type="button" data-action="close-sheet" aria-label="Dismiss"></button>' +
-      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Identify sections"><h2>Identify sections</h2>' +
-      '<p class="meta">Lights a short marker every few LEDs. Each output gets its own color so you can see which wire is which.</p>' +
-      '<div class="chips">' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="25">25</button>' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="50">50</button>' +
-      '<button type="button" class="chip" data-action="sections-go" data-every="100">100</button></div>' +
-      '<label class="field"><span>Custom size</span><input id="section-every" inputmode="numeric" value="25" aria-label="Custom section size"></label>' +
-      '<button class="btn primary" type="button" data-action="sections-custom">Use custom</button>' +
-      '<button class="btn ghost" type="button" data-action="close-sheet">Close</button></div>';
+      '<div class="sheet" role="dialog" aria-modal="true" aria-label="Identify LED sections"><div class="sheet-head"><div><p class="eyebrow">TOOLS</p><h2>Identify LED sections</h2></div><button class="sheet-close" type="button" data-action="tools">Back</button></div>' +
+      '<p class="meta">Targets ' + count + " included controller" + (count === 1 ? "" : "s") + ". Each output gets its own color, and the previous look returns automatically after 45 seconds.</p>" +
+      '<div class="tool-block"><div class="block-title"><span>Marker spacing</span></div><div class="chips">' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="25">25 LEDs</button>' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="50">50 LEDs</button>' +
+      '<button type="button" class="chip" data-action="sections-go" data-every="100">100 LEDs</button></div>' +
+      '<label class="field"><span>Custom spacing</span><input id="section-every" inputmode="numeric" value="25" aria-label="Custom section size"></label>' +
+      '<button class="btn primary" type="button" data-action="sections-custom">Start identification</button></div></div>';
   }
 
   function nameSheet() {
@@ -1112,45 +1254,80 @@
       '<button class="btn" type="button" data-action="close-sheet">Close</button></div>';
   }
 
-  async function load(resetScroll) {
-    state.route = parseRoute();
+  async function load(resetScroll, options) {
+    const generation = ++loadGeneration;
+    const route = parseRoute();
+    state.route = route;
+    const controlRequestId = ++controlGeneration;
+    const paintEarly = !options || options.paintEarly !== false;
     if (state.devices.length || state.control) state.booting = false;
     let painted = false;
-    if (!state.booting && canRepaint()) {
-      render({ resetScroll: !!resetScroll });
+    if (paintEarly && !state.booting && canRepaint()) {
+      render({ resetScroll: !!resetScroll, transition: !!resetScroll });
       painted = true;
     }
     try {
       if (state.session.required && !state.session.ok) {
         state.booting = false;
-        render({ resetScroll: true });
+        if (generation === loadGeneration) render({ resetScroll: true });
         return;
       }
-      state.devices = await api("/api/devices");
-      state.status = await api("/api/status");
-      const route = state.route;
+      const devices = await api("/api/devices");
+      if (generation !== loadGeneration) return;
+      state.devices = devices;
+      const status = await api("/api/status");
+      if (generation !== loadGeneration) return;
+      state.status = status;
       if (route.name === "control") {
-        const query = state.groupId ? "?group=" + state.groupId : "";
+        const groupId = state.groupId;
+        const query = groupId ? "?group=" + groupId : "";
         const data = await api("/api/control" + query);
+        if (generation !== loadGeneration || controlRequestId !== controlGeneration || state.groupId !== groupId) return;
         applyFlashOverlay(data);
         state.control = data;
       }
       if (route.name === "device" && !state.hold) {
-        state.live = await api("/api/devices/" + route.mac + "/live");
-        state.backups = await api("/api/devices/" + route.mac + "/backups");
+        const live = await api("/api/devices/" + route.mac + "/live");
+        if (generation !== loadGeneration) return;
+        state.live = live;
+        const backups = await api("/api/devices/" + route.mac + "/backups");
+        if (generation !== loadGeneration) return;
+        state.backups = backups;
       }
-      if (route.name === "backup") state.backup = await api("/api/backups/" + route.id);
-      if (route.name === "diff") state.diff = await api("/api/backups/" + route.id + "/diff");
+      if (route.name === "backup") {
+        const backup = await api("/api/backups/" + route.id);
+        if (generation !== loadGeneration) return;
+        state.backup = backup;
+      }
+      if (route.name === "diff") {
+        const diff = await api("/api/backups/" + route.id + "/diff");
+        if (generation !== loadGeneration) return;
+        state.diff = diff;
+      }
       if (route.name === "firmware") {
-        state.bins = await api("/api/firmware/bins");
-        state.profiles = await api("/api/firmware/profiles");
+        const bins = await api("/api/firmware/bins");
+        if (generation !== loadGeneration) return;
+        state.bins = bins;
+        const profiles = await api("/api/firmware/profiles");
+        if (generation !== loadGeneration) return;
+        state.profiles = profiles;
       }
-      if (route.name === "events") state.events = await api("/api/events");
-      if (route.name === "settings") state.settings = await api("/api/settings");
+      if (route.name === "events") {
+        const events = await api("/api/events");
+        if (generation !== loadGeneration) return;
+        state.events = events;
+      }
+      if (route.name === "settings") {
+        const settings = await api("/api/settings");
+        if (generation !== loadGeneration) return;
+        state.settings = settings;
+      }
+      if (generation !== loadGeneration) return;
       state.error = "";
     } catch (error) {
-      if (error.message !== "Sign in required" && !state.devices.length && !state.control) state.error = error.message;
+      if (generation === loadGeneration && error.message !== "Sign in required" && !state.devices.length && !state.control) state.error = error.message;
     }
+    if (generation !== loadGeneration) return;
     state.booting = false;
     persistUi();
     if (canRepaint()) render({ resetScroll: !!resetScroll && !painted });
@@ -1221,9 +1398,16 @@
 
   async function confirmPending() {
     const pending = state.pending || {};
+    state.pending = null;
+    const returnAction = state.sheetReturn;
     state.sheet = null;
     render();
-    if (pending.type === "reboot") {
+    if (pending.type === "group-delete") {
+      await api("/api/groups/" + pending.id, { method: "DELETE" });
+      if (Number(state.groupId) === Number(pending.id)) state.groupId = null;
+      state.groupDraft = null;
+      await refreshControl(true);
+    } else if (pending.type === "reboot") {
       await api("/api/devices/" + pending.mac + "/reboot", { method: "POST" });
       toast("Rebooted");
     } else if (pending.type === "forget") {
@@ -1247,6 +1431,7 @@
       await watchJob(await api("/api/bulk/backup", { method: "POST", body: JSON.stringify({ macs: pending.macs }) }));
     }
     await load(false);
+    focusAction(returnAction);
   }
 
   async function watchJob(job) {
@@ -1273,31 +1458,20 @@
     if (!target || target.dataset.repeat) return;
     const action = target.dataset.action;
     if (action === "close-sheet") {
-      state.sheet = null;
+      if (state.sheet && state.sheet.kind === "confirm" && state.pending && state.pending.returnSheet) {
+        state.sheet = state.pending.returnSheet;
+        state.pending = null;
+      } else {
+        state.sheet = null;
+      }
       render();
       return;
     }
     if (action === "pick-board") {
-      if (event.target.closest("input, label, button, a")) return;
       const mac = target.dataset.mac;
-      const now = Date.now();
-      if (state.pickMac === mac && now - state.pickAt < 320) {
-        state.pickMac = "";
-        state.pickAt = 0;
-        const devices = (state.control && state.control.devices) || [];
-        state.skipped = {};
-        devices.forEach((device) => {
-          if (device.mac !== mac) state.skipped[device.mac] = true;
-        });
-        state.justSelected = mac;
-        render();
-        return;
-      }
-      state.pickMac = mac;
-      state.pickAt = now;
       if (state.skipped[mac]) delete state.skipped[mac];
       else state.skipped[mac] = true;
-      state.justSelected = "";
+      state.justSelected = mac;
       render();
       return;
     }
@@ -1385,25 +1559,59 @@
       });
       return;
     }
-    if (action === "more") {
-      state.sheet = { kind: "more" };
+    if (action === "more" || action === "customize") {
+      state.sheet = { kind: "customize" };
       render();
       return;
     }
-    if (action === "edit-boards") {
-      state.sheet = { kind: "boards" };
+    if (action === "tools") {
+      state.sheet = { kind: "tools" };
       render();
       return;
     }
-    if (action === "rename-group") {
+    if (action === "saved-looks") {
+      state.sheet = { kind: "saved" };
+      render();
+      return;
+    }
+    if (action === "edit-group") {
       const group = ((state.control && state.control.groups) || []).find((item) => item.id === Number(state.groupId));
-      state.sheet = { kind: "name", mode: "rename", id: Number(state.groupId), title: "Rename", value: group ? group.name : "" };
+      if (!group) return;
+      const members = {};
+      (group.macs || []).forEach((mac) => { members[mac] = true; });
+      state.groupDraft = { id: group.id, name: group.name, members };
+      state.sheet = { kind: "group" };
       render();
       return;
     }
     if (action === "new-group") {
-      state.sheet = { kind: "name", mode: "group", title: "New group", value: "" };
+      state.groupDraft = { id: null, name: "", members: {} };
+      state.sheet = { kind: "group" };
       render();
+      setTimeout(() => { const input = document.getElementById("group-name"); if (input) input.focus(); }, 0);
+      return;
+    }
+    if (action === "save-group") {
+      const draft = state.groupDraft || { id: null, members: {} };
+      const name = value("group-name");
+      const macs = Object.keys(draft.members).filter((mac) => draft.members[mac]);
+      await run(target, "Saving…", async () => {
+        if (!name) throw new Error("Enter a group name.");
+        let group;
+        if (draft.id == null) {
+          group = await api("/api/groups", { method: "POST", body: JSON.stringify({ name, macs }) });
+        } else {
+          group = await api("/api/groups/" + draft.id, { method: "PATCH", body: JSON.stringify({ name, macs }) });
+        }
+        const returnAction = state.sheetReturn;
+        state.groupId = group.id;
+        state.groupDraft = null;
+        state.sheet = null;
+        state.skipped = {};
+        render();
+        await refreshControl(true);
+        focusAction(returnAction);
+      });
       return;
     }
     if (action === "save-scene") {
@@ -1415,29 +1623,23 @@
       const name = value("sheet-name");
       const sheet = state.sheet;
       await run(target, "Saving…", async () => {
-        if (sheet.mode === "group") {
-          const created = await api("/api/groups", { method: "POST", body: JSON.stringify({ name }) });
-          const macs = ((state.control && state.control.devices) || []).filter((device) => device.online).map((device) => device.mac);
-          if (macs.length) await api("/api/groups/" + created.id + "/members", { method: "PUT", body: JSON.stringify({ macs }) });
-          state.groupId = created.id;
-          state.skipped = {};
-        }
-        if (sheet.mode === "rename") await api("/api/groups/" + sheet.id, { method: "PATCH", body: JSON.stringify({ name }) });
         if (sheet.mode === "scene") {
           await api("/api/scenes", { method: "POST", body: JSON.stringify({ name, look: currentLook() }) });
         }
+        const returnAction = state.sheetReturn;
         state.sheet = null;
+        render();
         await refreshControl(true);
+        focusAction(returnAction);
       });
       return;
     }
     if (action === "delete-group") {
-      await run(target, "Deleting…", async () => {
-        await api("/api/groups/" + state.sheet.id, { method: "DELETE" });
-        if (Number(state.groupId) === Number(state.sheet.id)) state.groupId = null;
-        state.sheet = null;
-        await refreshControl(true);
-      });
+      const draft = state.groupDraft;
+      if (!draft || draft.id == null) return;
+      state.pending = { type: "group-delete", id: draft.id, returnSheet: { kind: "group" } };
+      state.sheet = { kind: "confirm", title: "Delete group?", body: draft.name + " will be removed. Controllers and backups are not deleted.", confirm: "Delete group", danger: true };
+      render();
       return;
     }
     if (action === "look-color") {
@@ -1464,19 +1666,29 @@
     }
     if (action === "pick-effect" || action === "pick-palette") {
       const key = action === "pick-effect" ? "fx" : "pal";
-      state.sheet = null;
-      await run(target, "…", () => pushLook("direct", null, { on: true, [key]: Number(target.dataset.id) }));
+      const selected = Number(target.dataset.id);
+      state.look[key] = selected;
+      await run(target, "…", async () => {
+        await pushLook("direct", null, { on: true, [key]: selected });
+        state.sheet = { kind: "customize" };
+        render();
+      });
       return;
     }
     if (action === "apply-preset" || action === "play-scene") {
       await run(target, "…", () => pushLook(action, target.dataset.id));
+      render();
       return;
     }
     if (action === "tune") {
       const delta = Number(target.dataset.dir);
       const device = (state.control.devices || []).find((item) => targetMacs().indexOf(item.mac) >= 0);
-      const next = Math.max(0, Math.min(255, Number(device ? device.sx : 128) + delta));
-      await run(target, "…", () => pushLook("direct", null, { sx: next }));
+      const next = Math.max(0, Math.min(255, Number(device ? device.sx : state.look.sx) + delta));
+      state.look.sx = next;
+      await run(target, "…", async () => {
+        await pushLook("direct", null, { sx: next });
+        render();
+      });
       return;
     }
     if (action === "confirm") {
@@ -1827,14 +2039,12 @@
       state.look.bri = Number(target.value);
       queueBrightness();
     }
-    if (target.dataset.action === "member") {
-      const mac = target.dataset.mac;
-      const groupId = target.dataset.group;
-      const path = "/api/groups/" + groupId + "/members" + (target.checked ? "" : "/" + compact(mac));
-      const options = target.checked
-        ? { method: "POST", body: JSON.stringify({ mac }) }
-        : { method: "DELETE" };
-      api(path, options).then(() => refreshControl(true)).catch((error) => toast(error.message));
+    if (target.dataset.action === "group-member") {
+      if (!state.groupDraft) return;
+      state.groupDraft.name = value("group-name");
+      state.groupDraft.members[target.dataset.mac] = target.checked;
+      const count = document.querySelector(".block-title strong");
+      if (count) count.textContent = Object.keys(state.groupDraft.members).filter((mac) => state.groupDraft.members[mac]).length + " selected";
     }
     if (target.dataset.action === "typed") {
       const device = deviceBy(state.route.mac);
@@ -1858,6 +2068,17 @@
   }
 
   function onInput(event) {
+    if (event.target.id === "choice-filter") {
+      const query = event.target.value.trim().toLowerCase();
+      document.querySelectorAll("[data-choice]").forEach((node) => {
+        node.hidden = query && !node.dataset.choice.includes(query);
+      });
+      return;
+    }
+    if (event.target.id === "group-name" && state.groupDraft) {
+      state.groupDraft.name = event.target.value;
+      return;
+    }
     if (event.target.id === "look-range") {
       state.hold = true;
       state.look.bri = Number(event.target.value);
@@ -1951,58 +2172,16 @@
       rememberUndo();
       state.holdingUndo = true;
     }
-    const handle = event.target.closest("[data-drag]");
-    if (handle) {
-      const board = ((state.control && state.control.devices) || []).find((item) => item.mac === handle.dataset.mac);
-      state.drag = {
-        mac: handle.dataset.mac,
-        name: board ? board.name : "Board",
-        x: event.clientX,
-        y: event.clientY,
-        moved: false,
-        drop: null,
-      };
-      return;
-    }
     const button = event.target.closest("[data-repeat]");
     if (!button || button.disabled) return;
     event.preventDefault();
     repeated = false;
     startRepeat(button);
   });
-  window.addEventListener("pointermove", (event) => {
-    if (!state.drag) return;
-    const dx = event.clientX - state.drag.x;
-    const dy = event.clientY - state.drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 12) state.drag.moved = true;
-    const ghost = document.getElementById("drag-ghost");
-    if (ghost && state.drag.moved) {
-      ghost.hidden = false;
-      ghost.textContent = state.drag.name;
-      ghost.style.left = (event.clientX + 8) + "px";
-      ghost.style.top = (event.clientY + 8) + "px";
-    }
-    const under = document.elementFromPoint(event.clientX, event.clientY);
-    const chip = under && under.closest("[data-drop-group]");
-    document.querySelectorAll("[data-drop-group]").forEach((node) => node.classList.toggle("drop", node === chip));
-    state.drag.drop = chip ? chip.dataset.dropGroup : null;
-  });
   window.addEventListener("pointerup", () => {
     clearInterval(repeat);
     repeat = 0;
     state.holdingUndo = false;
-    if (!state.drag) return;
-    const drag = state.drag;
-    state.drag = null;
-    const ghost = document.getElementById("drag-ghost");
-    if (ghost) ghost.hidden = true;
-    document.querySelectorAll(".drop").forEach((node) => node.classList.remove("drop"));
-    if (drag.moved && drag.drop) {
-      state.suppressClick = true;
-      api("/api/groups/" + drag.drop + "/members", { method: "POST", body: JSON.stringify({ mac: drag.mac }) })
-        .then(() => { toast("Added to the group"); return refreshControl(true); })
-        .catch((error) => toast(error.message));
-    }
   });
   window.addEventListener("pointercancel", () => { clearInterval(repeat); repeat = 0; });
   window.addEventListener("hashchange", () => {
@@ -2010,10 +2189,12 @@
     state.edits = null;
     state.selecting = false;
     state.selected = {};
-    state.route = parseRoute();
+    const route = parseRoute();
+    clearRouteState(route);
+    state.route = route;
     state.booting = false;
-    if (canRepaint()) render({ resetScroll: true });
-    load(false);
+    if (canRepaint()) render({ resetScroll: true, transition: true });
+    load(false, { paintEarly: false });
   });
   root.addEventListener("focusout", (event) => {
     const input = event.target;

@@ -135,6 +135,7 @@ class SectionsIn(BaseModel):
 
 class GroupIn(BaseModel):
     name: str = Field(min_length=1, max_length=32)
+    macs: list[str] | None = Field(default=None, max_length=100)
 
 
 class MembersIn(BaseModel):
