@@ -1,7 +1,11 @@
 import CoreFoundation
 import Foundation
 
+/// Checks fixture documents against `schema/fixture.v1.json`.
+/// schemaVersion 1 and 2 are both valid. Version 2 adds groups, reference marks, and session alignments. A version 1 document stays valid.
 public enum SchemaCheck {
+    public static let schemaVersions = [1, 2]
+
     public static func errors(in value: Any, schema: [String: Any]) -> [String] {
         let defs = schema["$defs"] as? [String: Any] ?? [:]
         return check(value, schema, defs, "$")

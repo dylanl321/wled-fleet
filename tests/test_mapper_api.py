@@ -289,3 +289,24 @@ def test_exports_download(tmp_path):
         assert 'PixelCount="60"' in model.text
         blaze = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}/export?format=pixelblaze")
         assert json.loads(blaze.text)[30][1] == 0.5
+
+
+def test_branch_chase_accepts_a_target_and_rejects_an_unknown_one(tmp_path):
+    app = _app(tmp_path)
+    with TestClient(app) as client:
+        assert client.post("/api/mapper/fixtures", json=TREE).status_code == 200
+        started = client.post(
+            f"/api/mapper/fixtures/{TREE['id']}/effect",
+            json={"name": "branch-chase", "params": {"target": "branches", "heightM": 1.4, "branchU": 0.2}},
+        )
+        assert started.status_code == 200, started.text
+        assert started.json()["effect"] == "branch-chase"
+        missing = client.post(
+            f"/api/mapper/fixtures/{TREE['id']}/effect",
+            json={"name": "fill-bottom", "params": {"target": "nope"}},
+        )
+        assert missing.status_code == 400
+        saved = client.get(f"/api/mapper/fixtures/{TREE['id']}").json()
+        assert saved["schemaVersion"] == 1
+        assert saved["groups"][0]["role"] == "trunk"
+        assert len(saved["references"]) == 3

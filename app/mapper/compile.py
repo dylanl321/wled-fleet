@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from app.mapper.align import outward_parameters
 from app.mapper.geom import (
     EPS,
     Vec3,
@@ -35,6 +36,11 @@ class Pixel:
     z: float
     segment: str
     u: float
+    group: str = ""
+    group_name: str = ""
+    group_role: str = ""
+    branch_u: float = 0.0
+    branch_height: float = 0.0
 
     def as_dict(self) -> dict:
         return {
@@ -47,6 +53,11 @@ class Pixel:
             "z": self.z,
             "segment": self.segment,
             "u": self.u,
+            "group": self.group,
+            "groupName": self.group_name,
+            "groupRole": self.group_role,
+            "branchU": self.branch_u,
+            "branchHeight": self.branch_height,
         }
 
 
@@ -221,7 +232,66 @@ def compile_fixture(fixture: dict) -> list[Pixel]:
     for run in fixture.get("runs") or []:
         if isinstance(run, dict):
             pixels.extend(compile_run(name, run, waypoints))
-    return pixels
+    return annotate_groups(fixture, pixels)
+
+
+def annotate_groups(fixture: dict, pixels: list[Pixel]) -> list[Pixel]:
+    """Attach group names and branch-relative u / height. Wire order is unchanged."""
+    if not pixels:
+        return pixels
+    groups = _groups(fixture)
+    segment_group = _segment_groups(fixture)
+    buckets: dict[str, list[int]] = {}
+    for index, pixel in enumerate(pixels):
+        group_id = segment_group.get(pixel.segment, "")
+        key = group_id if group_id else f"segment:{pixel.segment}"
+        buckets.setdefault(key, []).append(index)
+    trunk_points: list[Vec3] = []
+    for indices in buckets.values():
+        group_id = segment_group.get(pixels[indices[0]].segment, "")
+        group = groups.get(group_id)
+        if group and group.get("role") == "trunk":
+            trunk_points.extend(Vec3(pixels[index].x, pixels[index].y, pixels[index].z) for index in indices)
+    annotated = list(pixels)
+    for indices in buckets.values():
+        group_id = segment_group.get(pixels[indices[0]].segment, "")
+        group = groups.get(group_id) if group_id else None
+        role = group.get("role") if group and group.get("role") in {"trunk", "branch"} else ""
+        name = str(group.get("name")) if group and isinstance(group.get("name"), str) else ""
+        points = [Vec3(pixels[index].x, pixels[index].y, pixels[index].z) for index in indices]
+        parameters = outward_parameters(points, str(role), trunk_points)
+        for index, (branch_u, branch_height) in zip(indices, parameters):
+            annotated[index] = replace(
+                pixels[index],
+                group=group_id,
+                group_name=name,
+                group_role=str(role),
+                branch_u=branch_u,
+                branch_height=branch_height,
+            )
+    return annotated
+
+
+def _groups(fixture: dict) -> dict[str, dict]:
+    found: dict[str, dict] = {}
+    for group in fixture.get("groups") or []:
+        if isinstance(group, dict) and isinstance(group.get("id"), str):
+            found[group["id"]] = group
+    return found
+
+
+def _segment_groups(fixture: dict) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for run in fixture.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        run_group = run.get("groupId") if isinstance(run.get("groupId"), str) else ""
+        for segment in run.get("segments") or []:
+            if not isinstance(segment, dict) or not isinstance(segment.get("id"), str):
+                continue
+            segment_group = segment.get("groupId") if isinstance(segment.get("groupId"), str) else ""
+            found[segment["id"]] = segment_group or run_group
+    return found
 
 
 def validate_counts(fixture: dict, pixels: list[Pixel] | None = None) -> list[dict]:

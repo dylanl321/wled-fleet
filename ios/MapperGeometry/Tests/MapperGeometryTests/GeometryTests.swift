@@ -162,13 +162,125 @@ final class GeometryTests: XCTestCase {
 
     func testFillFromBottom() throws {
         let pixels = try compile(fixture("straight-1m.json"))
-        let dark = effectColors(pixels, .fillBottom, phase: 0)
+        let dark = try effectColors(pixels, .fillBottom, phase: 0)
         XCTAssertEqual(dark[0], RGB(255, 244, 230))
         XCTAssertEqual(dark[10], RGB(0, 0, 0))
-        let full = effectColors(pixels, .fillBottom, phase: 1)
+        let full = try effectColors(pixels, .fillBottom, phase: 1)
         XCTAssertTrue(full.allSatisfy { $0 == RGB(255, 244, 230) })
-        let rainbow = effectColors(pixels, .heightRainbow, phase: 0)
+        let rainbow = try effectColors(pixels, .heightRainbow, phase: 0)
         XCTAssertNotEqual(rainbow[0], rainbow[pixels.count / 2])
+    }
+
+    func testDriftSpreadsByPathDistance() throws {
+        let points = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 0, 0)]
+        let result = try distributeDrift(points, retap: Vec3(0, 0.4, 0))
+        assertClose(result.errorM, 0.4)
+        assertClose(result.weights[0], 0)
+        assertClose(result.weights[1], 1 / 2.4)
+        assertClose(result.weights[2], 2 / 2.4)
+        XCTAssertEqual(result.corrected[0], points[0])
+        assertClose(result.corrected[2].y, -0.4 * 2 / 2.4)
+        let held = try distributeDrift([Vec3(5, 5, 5), Vec3(0, 0, 0), Vec3(1, 0, 0)], retap: Vec3(0, 0.3, 0), referenceIndex: 1)
+        XCTAssertEqual(held.corrected[0], Vec3(5, 5, 5))
+        assertClose(held.weights[0], 0)
+    }
+
+    func testTwoMarksYawAndThreeMarksKabsch() throws {
+        let yaw = 0.4
+        let shift = Vec3(2, -1, 3)
+        let source = [Vec3(0, 0, 0), Vec3(1, 0.2, 0)]
+        let target = source.map { applyRotation(yawMatrix(yaw), $0) + shift }
+        let rigid = try alignSessions(source, target, referenceIds: ["base", "tip"])
+        XCTAssertEqual(rigid.method, .yawTranslation)
+        assertClose(rigid.yawRadians, yaw)
+        assertClose(rigid.residualM, 0, tol: 1e-9)
+        assertClose(rigid.rotation[4], 1)
+        for index in source.indices {
+            assertClose(distance(rigid.apply(source[index]), target[index]), 0, tol: 1e-9)
+        }
+        let pitched = source.map { rodrigues($0, Vec3(1, 0, 0), 20 * Double.pi / 180) }
+        let flat = try alignSessions(source, pitched)
+        XCTAssertEqual(flat.method, .yawTranslation)
+        XCTAssertGreaterThan(flat.residualM, 1e-3)
+        assertClose(flat.rotation[4], 1)
+
+        let square = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 0.2, 1), Vec3(1, 0.4, 1)]
+        let tilted = square.map { rodrigues($0, Vec3(1, 2, 3), 0.6) + Vec3(1, -2, 0.5) }
+        let full = try alignSessions(square, tilted)
+        XCTAssertEqual(full.method, .kabsch)
+        assertClose(full.residualM, 0, tol: 1e-6)
+
+        let frame = FrameTransform(translation: Vec3(-1, 2, 0.5), yawRadians: 0.7)
+        let point = Vec3(0.2, -3, 1.4)
+        let same = rigidFromFrame(frame)
+        assertClose(distance(same.apply(point), applyFrame(point, frame)), 0, tol: 1e-12)
+    }
+
+    func testBranchChaseAndSchemaVersionTwo() throws {
+        let tree = try fixture("branching-tree.json")
+        XCTAssertEqual(tree.schemaVersion, 1)
+        XCTAssertEqual(tree.groups?.count, 3)
+        XCTAssertEqual(tree.references?.count, 3)
+        let pixels = try compile(tree)
+        let branchOne = pixels.filter { $0.group == "branch-1" }
+        let branchTwo = pixels.filter { $0.group == "branch-2" }
+        let trunk = pixels.filter { $0.groupRole == "trunk" }
+        assertClose(branchOne[0].branchU, 0)
+        assertClose(branchOne[branchOne.count - 1].branchU, 1)
+        assertClose(branchTwo[0].branchU, 1)
+        assertClose(branchTwo[branchTwo.count - 1].branchU, 0)
+        XCTAssertLessThan(trunk[0].branchU, trunk[trunk.count - 1].branchU)
+
+        let leaving = try effectColors(pixels, .branchChase, phase: 0, address: EffectAddress(target: "branches"))
+        let arriving = try effectColors(pixels, .branchChase, phase: 1, address: EffectAddress(target: "branches"))
+        for index in pixels.indices {
+            let pixel = pixels[index]
+            if pixel.groupRole != "branch" {
+                XCTAssertEqual(leaving[index], RGB(0, 0, 0))
+                XCTAssertEqual(arriving[index], RGB(0, 0, 0))
+            } else if abs(pixel.branchU) < 1e-9 {
+                XCTAssertEqual(leaving[index], RGB(255, 244, 230))
+                XCTAssertEqual(arriving[index], RGB(0, 0, 0))
+            } else if abs(pixel.branchU - 1) < 1e-9 {
+                XCTAssertEqual(leaving[index], RGB(0, 0, 0))
+                XCTAssertEqual(arriving[index], RGB(255, 244, 230))
+            }
+        }
+        let ring = try effectColors(pixels, .heightRainbow, phase: 0, address: EffectAddress(target: "all branches", heightM: 1.4, bandM: 0.05))
+        let lit = zip(pixels, ring).filter { $0.1 != RGB(0, 0, 0) }.map(\.0)
+        XCTAssertFalse(lit.isEmpty)
+        XCTAssertTrue(lit.allSatisfy { $0.groupRole == "branch" && abs($0.y - 1.4) <= 0.05 + 1e-9 })
+        XCTAssertThrowsError(try effectColors(pixels, .branchChase, phase: 0, address: EffectAddress(target: "nope")))
+
+        let straight = try fixture("straight-1m.json")
+        let marks = deriveReferences(straight.waypoints)
+        XCTAssertEqual(marks.map(\.label), ["Start", "End"])
+        var versionTwo = straight
+        versionTwo.schemaVersion = 2
+        versionTwo.references = marks
+        versionTwo.alignments = [
+            SessionAlignment(
+                method: .yawTranslation,
+                rotation: [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                translation: .zero,
+                yawRadians: 0,
+                residualM: 0.012,
+                referenceIds: marks.map(\.id)
+            )
+        ]
+        let encoded = try JSONEncoder().encode(versionTwo)
+        let schema = try Data(contentsOf: repoRoot().appendingPathComponent("schema/fixture.v1.json"))
+        let errors = try SchemaCheck.validateFixture(encoded, schemaData: schema)
+        XCTAssertEqual(errors, [], errors.joined(separator: "\n"))
+        let decoded = try JSONDecoder().decode(Fixture.self, from: encoded)
+        XCTAssertEqual(decoded.schemaVersion, 2)
+        XCTAssertEqual(decoded.alignments?.first?.method, .yawTranslation)
+        XCTAssertEqual(SchemaCheck.schemaVersions, [1, 2])
+    }
+
+    private func rodrigues(_ point: Vec3, _ axis: Vec3, _ angle: Double) -> Vec3 {
+        let unit = axis.normalized()
+        return point * cos(angle) + unit.cross(point) * sin(angle) + unit * (unit.dot(point) * (1 - cos(angle)))
     }
 
     private func fixture(_ name: String) throws -> Fixture {

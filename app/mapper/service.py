@@ -13,12 +13,12 @@ from app.discovery import normalize_mac
 from app.errors import FleetError, WledError
 from app.mapper.address import absolute_pixels, bus_start, migrate_saved_fixtures
 from app.mapper.advertise import MapperAdvertiser
-from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
+from app.mapper.compile import CompileError, compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
 from app.mapper.effects import EFFECTS, effect_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_xmodel
-from app.mapper.geom import normalise_points, vec3
+from app.mapper.geom import apply_frame, normalise_points, vec3
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import SchemaError
 from app.mapper.store import FixtureStore
@@ -149,6 +149,10 @@ class MapperService:
         ):
             waypoint["position"] = point.as_list()
         updated["frame"] = frame.as_dict()
+        if isinstance(updated.get("references"), list):
+            for item in updated["references"]:
+                if isinstance(item, dict) and "position" in item:
+                    item["position"] = apply_frame(vec3(item.get("position")), frame).as_list()
         return self.save_fixture(updated)
 
     def scale_pitch(self, fixture_id: str, run_id: str) -> dict:
@@ -186,9 +190,14 @@ class MapperService:
         return {"ok": True, "controller": mac, "output": int(output), "index": int(index)}
 
     async def start_effect(self, fixture_id: str, name: str, params: dict | None) -> dict:
-        self._require(fixture_id)
+        fixture = self._require(fixture_id)
         if name not in EFFECTS:
             raise FleetError(f"Unknown effect {name}.", 400)
+        options = params or {}
+        try:
+            effect_colors(compile_fixture(fixture), name, 0.0, options)
+        except (ValueError, CompileError) as exc:
+            raise FleetError(str(exc), 400) from exc
         async with self._lock:
             self._token += 1
             self._highlight = None
@@ -350,9 +359,10 @@ class MapperService:
             fixture = self.store.get(payload["fixtureId"])
             if fixture is None or token != self._token:
                 return
-            seconds = _seconds(payload.get("params") or {})
+            options = payload.get("params") or {}
+            seconds = _seconds(options)
             phase = ((time.monotonic() - payload["started"]) / seconds) % 1.0
-            await self._send_fixture(fixture, effect=payload["name"], phase=phase, token=token)
+            await self._send_fixture(fixture, effect=payload["name"], phase=phase, params=options, token=token)
         self._frames += 1
         now = time.monotonic()
         elapsed = now - self._fps_mark
@@ -390,6 +400,7 @@ class MapperService:
         effect: str | None = None,
         phase: float = 0.0,
         black: bool = False,
+        params: dict | None = None,
         token: int | None = None,
     ) -> None:
         compiled = compile_fixture(fixture)
@@ -398,7 +409,10 @@ class MapperService:
         if token is not None and token != self._token:
             return
         pixels = absolute_pixels(compiled, self.controllers())
-        colors = [(0, 0, 0)] * len(pixels) if black or effect is None else effect_colors(compiled, effect, phase)
+        if black or effect is None:
+            colors = [(0, 0, 0)] * len(pixels)
+        else:
+            colors = effect_colors(compiled, effect, phase, params or {})
         grouped: dict[str, dict[int, tuple[int, int, int]]] = {}
         orders: dict[str, int] = {}
         for pixel, color in zip(pixels, colors):

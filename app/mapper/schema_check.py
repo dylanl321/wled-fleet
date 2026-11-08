@@ -2,7 +2,9 @@
 
 The checker implements the slice of JSON Schema that the fixture file uses,
 so the server does not take a new dependency and the Swift package can mirror
-the same rules.
+the same rules. schemaVersion 1 and 2 are both accepted. Version 2 adds
+optional groups, reference marks, and session alignments; a version 1 document
+remains valid.
 """
 
 from __future__ import annotations

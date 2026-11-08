@@ -210,13 +210,15 @@ public struct Segment: Equatable, Codable, Identifiable {
     public var waypointIds: [String]
     public var params: SegmentParams
     public var pixelCountOverride: Int?
+    public var groupId: String?
 
-    public init(id: String, kind: SegmentKind, waypointIds: [String], params: SegmentParams, pixelCountOverride: Int? = nil) {
+    public init(id: String, kind: SegmentKind, waypointIds: [String], params: SegmentParams, pixelCountOverride: Int? = nil, groupId: String? = nil) {
         self.id = id
         self.kind = kind
         self.waypointIds = waypointIds
         self.params = params
         self.pixelCountOverride = pixelCountOverride
+        self.groupId = groupId
     }
 }
 
@@ -228,6 +230,7 @@ public struct Run: Equatable, Codable, Identifiable {
     public var pixelCount: Int
     public var pitchMm: Double
     public var colorOrder: String
+    public var groupId: String?
     public var segments: [Segment]
 
     public init(
@@ -238,7 +241,8 @@ public struct Run: Equatable, Codable, Identifiable {
         pixelCount: Int,
         pitchMm: Double,
         colorOrder: String,
-        segments: [Segment]
+        segments: [Segment],
+        groupId: String? = nil
     ) {
         self.id = id
         self.controllerId = controllerId
@@ -247,7 +251,112 @@ public struct Run: Equatable, Codable, Identifiable {
         self.pixelCount = pixelCount
         self.pitchMm = pitchMm
         self.colorOrder = colorOrder
+        self.groupId = groupId
         self.segments = segments
+    }
+}
+
+public enum GroupRole: String, Codable {
+    case trunk
+    case branch
+}
+
+public struct FixtureGroup: Equatable, Codable, Identifiable {
+    public var id: String
+    public var name: String
+    public var role: GroupRole
+
+    public init(id: String, name: String, role: GroupRole) {
+        self.id = id
+        self.name = name
+        self.role = role
+    }
+}
+
+public struct ReferencePoint: Equatable, Codable, Identifiable {
+    public var id: String
+    public var label: String
+    public var position: Vec3
+    public var waypointId: String?
+
+    public init(id: String, label: String, position: Vec3, waypointId: String? = nil) {
+        self.id = id
+        self.label = label
+        self.position = position
+        self.waypointId = waypointId
+    }
+}
+
+public enum AlignmentMethod: String, Codable {
+    case worldMap
+    case yawTranslation
+    case kabsch
+}
+
+public struct SessionAlignment: Equatable {
+    public var version: Int
+    public var method: AlignmentMethod
+    public var rotation: [Double]
+    public var translation: Vec3
+    public var yawRadians: Double
+    public var residualM: Double
+    public var referenceIds: [String]
+
+    public init(
+        version: Int = 1,
+        method: AlignmentMethod,
+        rotation: [Double],
+        translation: Vec3,
+        yawRadians: Double,
+        residualM: Double,
+        referenceIds: [String] = []
+    ) {
+        self.version = version
+        self.method = method
+        self.rotation = rotation
+        self.translation = translation
+        self.yawRadians = yawRadians
+        self.residualM = residualM
+        self.referenceIds = referenceIds
+    }
+
+    public func apply(_ point: Vec3) -> Vec3 {
+        let r = rotation
+        return Vec3(
+            r[0] * point.x + r[1] * point.y + r[2] * point.z + translation.x,
+            r[3] * point.x + r[4] * point.y + r[5] * point.z + translation.y,
+            r[6] * point.x + r[7] * point.y + r[8] * point.z + translation.z
+        )
+    }
+}
+
+extension SessionAlignment: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case version, method, rotation, translation, yawRadians, residualM, referenceIds
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        method = try container.decode(AlignmentMethod.self, forKey: .method)
+        rotation = try container.decode([Double].self, forKey: .rotation)
+        translation = try container.decode(Vec3.self, forKey: .translation)
+        yawRadians = try container.decode(Double.self, forKey: .yawRadians)
+        residualM = try container.decode(Double.self, forKey: .residualM)
+        referenceIds = try container.decodeIfPresent([String].self, forKey: .referenceIds) ?? []
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(version, forKey: .version)
+        try container.encode(method, forKey: .method)
+        try container.encode(rotation, forKey: .rotation)
+        try container.encode(translation, forKey: .translation)
+        try container.encode(yawRadians, forKey: .yawRadians)
+        try container.encode(residualM, forKey: .residualM)
+        if !referenceIds.isEmpty {
+            try container.encode(referenceIds, forKey: .referenceIds)
+        }
     }
 }
 
@@ -260,11 +369,14 @@ public struct Fixture: Equatable, Codable, Identifiable {
     public var waypoints: [Waypoint]
     public var runs: [Run]
     public var frame: FrameTransform?
+    public var groups: [FixtureGroup]?
+    public var references: [ReferencePoint]?
+    public var alignments: [SessionAlignment]?
     public var createdAt: String?
     public var updatedAt: String?
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, name, origin, surfaceHint, waypoints, runs, frame, createdAt, updatedAt
+        case schemaVersion, id, name, origin, surfaceHint, waypoints, runs, frame, groups, references, alignments, createdAt, updatedAt
     }
 
     public init(
@@ -276,6 +388,9 @@ public struct Fixture: Equatable, Codable, Identifiable {
         waypoints: [Waypoint],
         runs: [Run],
         frame: FrameTransform? = nil,
+        groups: [FixtureGroup]? = nil,
+        references: [ReferencePoint]? = nil,
+        alignments: [SessionAlignment]? = nil,
         createdAt: String? = nil,
         updatedAt: String? = nil
     ) {
@@ -287,6 +402,9 @@ public struct Fixture: Equatable, Codable, Identifiable {
         self.waypoints = waypoints
         self.runs = runs
         self.frame = frame
+        self.groups = groups
+        self.references = references
+        self.alignments = alignments
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -301,6 +419,9 @@ public struct Fixture: Equatable, Codable, Identifiable {
         waypoints = try container.decode([Waypoint].self, forKey: .waypoints)
         runs = try container.decode([Run].self, forKey: .runs)
         frame = try container.decodeIfPresent(FrameTransform.self, forKey: .frame)
+        groups = try container.decodeIfPresent([FixtureGroup].self, forKey: .groups)
+        references = try container.decodeIfPresent([ReferencePoint].self, forKey: .references)
+        alignments = try container.decodeIfPresent([SessionAlignment].self, forKey: .alignments)
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
         updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
     }
@@ -315,6 +436,9 @@ public struct Fixture: Equatable, Codable, Identifiable {
         try container.encode(waypoints, forKey: .waypoints)
         try container.encode(runs, forKey: .runs)
         try container.encodeIfPresent(self.frame, forKey: CodingKeys.frame)
+        if let groups, !groups.isEmpty { try container.encode(groups, forKey: .groups) }
+        if let references, !references.isEmpty { try container.encode(references, forKey: .references) }
+        if let alignments, !alignments.isEmpty { try container.encode(alignments, forKey: .alignments) }
         try container.encodeIfPresent(createdAt, forKey: CodingKeys.createdAt)
         try container.encodeIfPresent(updatedAt, forKey: CodingKeys.updatedAt)
     }
@@ -330,8 +454,28 @@ public struct MappedPixel: Equatable {
     public var z: Double
     public var segment: String
     public var u: Double
+    public var group: String
+    public var groupName: String
+    public var groupRole: String
+    public var branchU: Double
+    public var branchHeight: Double
 
-    public init(fixture: String, controller: String, output: Int, index: Int, x: Double, y: Double, z: Double, segment: String, u: Double) {
+    public init(
+        fixture: String,
+        controller: String,
+        output: Int,
+        index: Int,
+        x: Double,
+        y: Double,
+        z: Double,
+        segment: String,
+        u: Double,
+        group: String = "",
+        groupName: String = "",
+        groupRole: String = "",
+        branchU: Double = 0,
+        branchHeight: Double = 0
+    ) {
         self.fixture = fixture
         self.controller = controller
         self.output = output
@@ -341,6 +485,11 @@ public struct MappedPixel: Equatable {
         self.z = z
         self.segment = segment
         self.u = u
+        self.group = group
+        self.groupName = groupName
+        self.groupRole = groupRole
+        self.branchU = branchU
+        self.branchHeight = branchHeight
     }
 
     public var position: Vec3 { Vec3(x, y, z) }
@@ -422,12 +571,14 @@ public enum EffectName: String, CaseIterable {
     case fillBottom = "fill-bottom"
     case heightRainbow = "height-rainbow"
     case angleSpin = "angle-spin"
+    case branchChase = "branch-chase"
 
     public var title: String {
         switch self {
         case .fillBottom: return "Fill from bottom"
         case .heightRainbow: return "Height rainbow"
         case .angleSpin: return "Angle spin"
+        case .branchChase: return "Chase"
         }
     }
 }

@@ -26,9 +26,29 @@ struct PixelRow: Decodable {
     var z: Double
     var segment: String
     var u: Double
+    var group: String?
+    var groupName: String?
+    var groupRole: String?
+    var branchU: Double?
+    var branchHeight: Double?
 
     var mapped: MappedPixel {
-        MappedPixel(fixture: fixture, controller: controller, output: output, index: index, x: x, y: y, z: z, segment: segment, u: u)
+        MappedPixel(
+            fixture: fixture,
+            controller: controller,
+            output: output,
+            index: index,
+            x: x,
+            y: y,
+            z: z,
+            segment: segment,
+            u: u,
+            group: group ?? "",
+            groupName: groupName ?? "",
+            groupRole: groupRole ?? "",
+            branchU: branchU ?? 0,
+            branchHeight: branchHeight ?? 0
+        )
     }
 }
 
@@ -109,15 +129,49 @@ final class ServerClient {
         )
     }
 
-    func effect(fixture: String, name: String) async throws {
+    func effect(fixture: String, name: String, address: EffectAddress = EffectAddress()) async throws {
         struct Body: Encodable {
             var name: String
-            var params: [String: Double]
+            var params: Params
+
+            struct Params: Encodable {
+                var seconds: Double
+                var target: String
+                var heightM: Double?
+                var branchHeightM: Double?
+                var branchU: Double?
+                var bandM: Double?
+                var bandU: Double?
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(seconds, forKey: .seconds)
+                    try container.encode(target, forKey: .target)
+                    try container.encodeIfPresent(heightM, forKey: .heightM)
+                    try container.encodeIfPresent(branchHeightM, forKey: .branchHeightM)
+                    try container.encodeIfPresent(branchU, forKey: .branchU)
+                    try container.encodeIfPresent(bandM, forKey: .bandM)
+                    try container.encodeIfPresent(bandU, forKey: .bandU)
+                }
+
+                private enum CodingKeys: String, CodingKey {
+                    case seconds, target, heightM, branchHeightM, branchU, bandM, bandU
+                }
+            }
         }
+        let params = Body.Params(
+            seconds: 6,
+            target: address.target,
+            heightM: address.heightM,
+            branchHeightM: address.branchHeightM,
+            branchU: address.branchU,
+            bandM: address.bandM,
+            bandU: address.bandU
+        )
         let _: Ack = try await send(
             path: "/api/mapper/fixtures/\(fixture)/effect",
             method: "POST",
-            body: Body(name: name, params: ["seconds": 6])
+            body: Body(name: name, params: params)
         )
     }
 

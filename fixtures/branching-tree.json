@@ -4,6 +4,16 @@
   "name": "Front tree",
   "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
   "surfaceHint": "branching",
+  "groups": [
+    {"id": "trunk", "name": "Trunk", "role": "trunk"},
+    {"id": "branch-1", "name": "Branch 1", "role": "branch"},
+    {"id": "branch-2", "name": "Branch 2", "role": "branch"}
+  ],
+  "references": [
+    {"id": "ref-base", "label": "Trunk base", "position": [0, 0, 0], "waypointId": "33333333-3333-4333-8333-000000000001"},
+    {"id": "ref-top", "label": "Trunk top", "position": [0, 1.2, 0], "waypointId": "33333333-3333-4333-8333-000000000002"},
+    {"id": "ref-tip", "label": "Branch 1 tip", "position": [0.6, 1.5, 0.2], "waypointId": "33333333-3333-4333-8333-000000000005"}
+  ],
   "waypoints": [
     {"id": "33333333-3333-4333-8333-000000000001", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Trunk base"},
     {"id": "33333333-3333-4333-8333-000000000002", "position": [0, 1.2, 0], "source": "typed", "confidence": 1, "label": "Trunk top"},
@@ -22,9 +32,11 @@
       "pixelCount": 141,
       "pitchMm": 16.666666666666668,
       "colorOrder": "GRB",
+      "groupId": "trunk",
       "segments": [
         {
           "id": "seg-trunk",
+          "groupId": "trunk",
           "kind": "helix",
           "waypointIds": [
             "33333333-3333-4333-8333-000000000001",
@@ -54,6 +66,7 @@
         },
         {
           "id": "seg-branch-1",
+          "groupId": "branch-1",
           "kind": "straight",
           "waypointIds": [
             "33333333-3333-4333-8333-000000000004",
@@ -72,6 +85,7 @@
         },
         {
           "id": "seg-branch-2",
+          "groupId": "branch-2",
           "kind": "straight",
           "waypointIds": [
             "33333333-3333-4333-8333-000000000006",
