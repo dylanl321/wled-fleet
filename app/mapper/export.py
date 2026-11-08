@@ -23,8 +23,10 @@ import json
 import xml.etree.ElementTree as ET
 
 from app.mapper.compile import Pixel, compile_fixture, points_for, waypoint_index
+from app.mapper.controllers import channels_for_order
 from app.mapper.geom import Vec3
 from app.mapper.ledmap import grid_map
+from app.mapper.wiring import wiring_attrs, wiring_block
 
 # xlights_version_string of the 2026.19 release. Master after that tag defaults
 # the same serializer to 2026.19.1; the attribute is the version string the
@@ -77,6 +79,7 @@ def xlights_xmodel(
     height: int,
     depth: int = 1,
     controller_name: str = "",
+    controllers: list[dict] | None = None,
 ) -> str:
     """Custom model in the current xLights export wrapper.
 
@@ -103,7 +106,10 @@ def xlights_xmodel(
     grid = grid_map(numbered, width=width, height=height, surface_hint=surface_hint, depth=depth)
     cells = _cells(grid["map"], width, height, depth)
     payload_name, payload = _custom_payload(cells)
-    attributes = _common_attributes(name, "Custom", controller_name)
+    wiring = _wiring_from_pixels(pixels, controllers)
+    label = wiring[0]["controller"] if wiring else controller_name
+    start = str(wiring[0]["startChannel"]) if wiring else "1"
+    attributes = _common_attributes(name, "Custom", label, start)
     attributes.update(
         {
             "CustomWidth": str(width),
@@ -119,10 +125,10 @@ def xlights_xmodel(
             payload_name: payload,
         }
     )
-    return _document([attributes])
+    return _document([{"attributes": attributes, "wiring": wiring}])
 
 
-def xlights_polyline(name: str, fixture: dict) -> str:
+def xlights_polyline(name: str, fixture: dict, controllers: list[dict] | None = None) -> str:
     """Poly Line model for a fixture whose runs are straight pieces.
 
     One <model> per run. PointData is the corner list in wire order, in metres,
@@ -135,7 +141,7 @@ def xlights_polyline(name: str, fixture: dict) -> str:
         raise ValueError("This fixture has no runs to export as a line.")
     waypoints = waypoint_index(fixture)
     pixels = compile_fixture(fixture)
-    models: list[dict[str, str]] = []
+    models: list[dict] = []
     channel = 1
     for run in runs:
         _require_line_run(run)
@@ -143,11 +149,21 @@ def xlights_polyline(name: str, fixture: dict) -> str:
         count = _run_pixel_count(run, pixels)
         if count < 1:
             raise ValueError("This line has no pixels.")
+        block = wiring_block(
+            controller_id=str(run.get("controllerId") or ""),
+            output=int(run.get("outputIndex") or 0),
+            start_index=int(run.get("startIndex") or 0),
+            pixel_count=int(run.get("pixelCount") or count),
+            color_order=str(run.get("colorOrder") or "GRB"),
+            controllers=controllers,
+        )
+        start = int(block["startChannel"]) if block["known"] else channel
+        block = dict(block)
+        block["startChannel"] = start
         label = name if len(runs) == 1 else f"{name} {int(run.get('outputIndex') or 0) + 1}"
-        attributes = _common_attributes(label, "Poly Line", str(run.get("controllerId") or ""))
+        attributes = _common_attributes(label, "Poly Line", str(block["controller"]), str(start))
         attributes.update(
             {
-                "StartChannel": str(channel),
                 "LightsPerNode": "1",
                 "NodesPerString": str(count),
                 "ScaleX": "1.000000",
@@ -161,15 +177,16 @@ def xlights_polyline(name: str, fixture: dict) -> str:
                 "DropPattern": "1",
                 "SegsExpanded": "TRUE",
                 "ModelHeight": "1.000000",
-                "WledOutput": str(int(run.get("outputIndex") or 0)),
+                "WledOutput": str(int(block["output"])),
                 "WledStart": str(int(run.get("startIndex") or 0)),
                 "WledPitch": f"{float(run.get('pitchMm') or 0):.6f}",
             }
         )
         for index in range(len(points)):
             attributes[f"Corner{index + 1}"] = "Neither"
-        models.append(attributes)
-        channel += count * 3
+        models.append({"attributes": attributes, "wiring": [block]})
+        if not block["known"]:
+            channel += count * channels_for_order(str(run.get("colorOrder") or "GRB"))
     return _document(models)
 
 
@@ -226,7 +243,7 @@ def _point_data(points: list[Vec3]) -> str:
     return ",".join(parts)
 
 
-def _common_attributes(name: str, display_as: str, controller_name: str) -> dict[str, str]:
+def _common_attributes(name: str, display_as: str, controller_name: str, start_channel: str = "1") -> dict[str, str]:
     return {
         "name": name,
         "DisplayAs": display_as,
@@ -237,7 +254,7 @@ def _common_attributes(name: str, display_as: str, controller_name: str) -> dict
         "PixelSize": "2",
         "StringType": "RGB Nodes",
         "Transparency": "0",
-        "StartChannel": "1",
+        "StartChannel": start_channel,
         "Controller": controller_name,
         "versionNumber": XLIGHTS_MODEL_VERSION,
         "SourceVersion": XLIGHTS_SOURCE_VERSION,
@@ -247,10 +264,45 @@ def _common_attributes(name: str, display_as: str, controller_name: str) -> dict
     }
 
 
-def _document(models: list[dict[str, str]]) -> str:
+def _wiring_from_pixels(pixels: list[Pixel], controllers: list[dict] | None) -> list[dict]:
+    keys: list[tuple[str, int]] = []
+    for pixel in pixels:
+        key = (pixel.controller, pixel.output)
+        if key not in keys:
+            keys.append(key)
+    blocks = []
+    for controller_id, output in keys:
+        owned = [pixel for pixel in pixels if pixel.controller == controller_id and pixel.output == output]
+        start_pixel = min(pixel.index for pixel in owned)
+        order = "GRB"
+        block = wiring_block(
+            controller_id=controller_id,
+            output=output,
+            start_index=0,
+            pixel_count=len(owned),
+            color_order=order,
+            controllers=controllers,
+        )
+        channels = int(block["channels"])
+        if block["known"]:
+            origin_pixel = (int(block["startChannel"]) - 1) // channels
+            if start_pixel > origin_pixel:
+                block["startChannel"] = start_pixel * channels + 1
+        else:
+            block["startChannel"] = start_pixel * channels + 1
+            block["pixelCount"] = len(owned)
+        blocks.append(block)
+    return blocks
+
+
+def _document(models: list[dict]) -> str:
     root = ET.Element("models", {"type": "exported"})
-    for attributes in models:
-        ET.SubElement(root, "model", _sorted_attributes(attributes))
+    for item in models:
+        attributes = item["attributes"] if "attributes" in item else item
+        wiring = item.get("wiring") or [] if isinstance(item, dict) else []
+        node = ET.SubElement(root, "model", _sorted_attributes(attributes))
+        for block in wiring:
+            ET.SubElement(node, "wiring", wiring_attrs(block))
     body = ET.tostring(root, encoding="unicode")
     return f'<?xml version="1.0" encoding="UTF-8"?>\n{body}\n'
 

@@ -43,7 +43,13 @@ struct FixtureScreen: View {
                         BigButton(title: "Capture", prominent: false) {
                             model.path.append(Route.capture(fixtureId))
                         }
-                        BigButton(title: "Ledmap", prominent: false) { confirmLedmap = true }
+                        BigButton(title: "Ledmap", prominent: false) {
+                            if let fixture, model.showRunning(fixture) {
+                                model.message = "Show running"
+                            } else {
+                                confirmLedmap = true
+                            }
+                        }
                         BigButton(title: "Share", prominent: false) { confirmShare = true }
                     }
                 }
@@ -111,7 +117,11 @@ struct FixtureScreen: View {
                 Text(fixture?.name ?? "Fixture")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.ink)
-                if let message = model.message, !previewOnly {
+                if let fixture, model.showRunning(fixture) {
+                    Text("Show running")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
+                } else if let message = model.message, !previewOnly {
                     Text(message)
                         .font(.subheadline)
                         .foregroundStyle(Theme.warn)

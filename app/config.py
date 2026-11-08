@@ -29,6 +29,10 @@ class Settings:
     ota_timeout: float = 180.0
     log_level: str = "INFO"
     app_version: str = APP_VERSION
+    player_url: str = ""
+    player_kind: str = "xschedule"
+    player_playlist: str = ""
+    xlights_show: str = ""
 
     @staticmethod
     def from_env() -> Settings:
@@ -51,6 +55,10 @@ class Settings:
             quinled_github_repo=os.environ.get("QUINLED_GITHUB_REPO", "intermittech/QuinLED-Firmware").strip(),
             ota_timeout=float(os.environ.get("OTA_TIMEOUT", "180")),
             log_level=os.environ.get("LOG_LEVEL", "INFO"),
+            player_url=os.environ.get("MAPPER_PLAYER_URL", "").strip(),
+            player_kind=os.environ.get("MAPPER_PLAYER_KIND", "xschedule").strip() or "xschedule",
+            player_playlist=os.environ.get("MAPPER_PLAYLIST", "").strip(),
+            xlights_show=os.environ.get("MAPPER_XLIGHTS_SHOW", "").strip(),
         )
 
     @property

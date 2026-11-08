@@ -21,10 +21,14 @@ from app.mapper.detect_math import code_frames, ddp_index
 from app.mapper.effects import EFFECTS, effect_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_polyline, xlights_xmodel
 from app.mapper.geom import apply_frame, normalise_points, vec3
-from app.mapper.importers import import_text
+from app.mapper.importers import import_rgbeffects, import_text, is_rgbeffects, phone_capture
 from app.mapper.ledmap import grid_map, linear_by_height
+from app.mapper.ownership import OwnerState, decide, look_from_state, renderer_sends
+from app.mapper.player import player_for
+from app.mapper.realtime import confirm, inferred_owner, local_addresses, source_address
 from app.mapper.schema_check import SchemaError
 from app.mapper.store import FixtureStore
+from app.mapper.xlights_sync import build_diff, drift_summary, sync_show
 from app.util import utcnow
 
 log = logging.getLogger(__name__)
@@ -71,6 +75,12 @@ class MapperService:
         self._advertiser = None
         self._detect: dict | None = None
         self._detect_hold = 180.0
+        self._player_override = None
+        self._drift: dict | None = None
+        self._drift_after = 0.0
+        self._infer_streak: dict[str, tuple[str | None, int]] = {}
+        self._watch: asyncio.Task | None = None
+        self._local_ips = local_addresses()
         self.status: dict = {
             "running": False,
             "effect": None,
@@ -84,11 +94,14 @@ class MapperService:
 
     def start(self) -> None:
         backup_fleet_db(self.fleet.db, self.settings.data_dir)
+        migrate_ownership(self.fleet.db, self.settings.data_dir)
         migrate_saved_fixtures(self.store, self.fleet, self.settings.data_dir)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.status.update(self._show_fields())
         if self.settings.scheduler_enabled:
             self._advertiser = MapperAdvertiser()
             self._advertiser.start(self.settings.port)
+            self._watch = asyncio.create_task(self._watch_shows(), name="wled-mapper-shows")
         self._task = asyncio.create_task(self._loop(), name="wled-mapper")
 
     async def stop(self) -> None:
@@ -101,6 +114,10 @@ class MapperService:
         if self._sock is not None:
             self._sock.close()
             self._sock = None
+        if self._watch is not None:
+            self._watch.cancel()
+            await asyncio.gather(self._watch, return_exceptions=True)
+            self._watch = None
         if self._advertiser is not None:
             self._advertiser.close()
             self._advertiser = None
@@ -115,7 +132,10 @@ class MapperService:
             self._subscribers.remove(queue)
 
     def controllers(self) -> list[dict]:
-        return list_controllers(self.fleet)
+        records = list_controllers(self.fleet)
+        for record in records:
+            record["owner"] = self._state(record["id"]).owner
+        return records
 
     def list_fixtures(self) -> list[dict]:
         return self.store.list_documents()
@@ -179,6 +199,7 @@ class MapperService:
     async def highlight(self, fixture_id: str, controller_id: str, output: int, index: int, hold: float = 2.5) -> dict:
         self._require(fixture_id)
         mac = self._mac(controller_id)
+        self._refuse_foreign(mac)
         if index < 0 or index > 20_000:
             raise FleetError("Pixel index is out of range.", 400)
         async with self._lock:
@@ -249,6 +270,8 @@ class MapperService:
                 400,
             )
         mac = self._mac(controllers[0])
+        if self._state(mac).owner == "xlights":
+            raise FleetError("A show is running on this controller. The ledmap waits until the show ends.", 409)
         device = self.fleet.db.get_device(mac)
         if device is None:
             raise FleetError("That controller is not in the fleet.", 404)
@@ -308,6 +331,7 @@ class MapperService:
             return pixels_json(fixture_id, pixels), "application/json", f"{filename}.json"
         if fmt == "pixelblaze":
             return pixelblaze_map(pixels), "application/json", f"{filename}.pixelblaze.json"
+        registry = self.controllers()
         if fmt == "xmodel":
             controller = pixels[0].controller if pixels else ""
             body = xlights_xmodel(
@@ -318,11 +342,12 @@ class MapperService:
                 height=height,
                 depth=depth,
                 controller_name=controller,
+                controllers=registry,
             )
             return body, "application/xml", f"{filename}.xmodel"
         if fmt == "polyline":
             try:
-                body = xlights_polyline(str(fixture.get("name") or "Fixture"), fixture)
+                body = xlights_polyline(str(fixture.get("name") or "Fixture"), fixture, registry)
             except ValueError as exc:
                 raise FleetError(str(exc), 400) from exc
             return body, "application/xml", f"{filename}.xmodel"
@@ -335,19 +360,35 @@ class MapperService:
         name: str = "",
         controller_id: str = "",
         output_index: int = 0,
+        scale_metres_per_unit: float | None = None,
+        apply: bool = False,
+        replace_phone: bool = False,
     ) -> dict:
         try:
+            if is_rgbeffects(text, filename):
+                if scale_metres_per_unit is None:
+                    raise ValueError("This xLights show needs scaleMetresPerUnit.")
+                parsed = import_rgbeffects(
+                    text,
+                    scale_metres_per_unit=scale_metres_per_unit,
+                    filename=filename,
+                    name=name,
+                    controller_id=controller_id,
+                    output_index=output_index,
+                )
+                return self._settle_show(parsed, apply=apply, replace_phone=replace_phone)
             document = import_text(
                 text,
                 filename=filename,
                 name=name,
                 controller_id=controller_id,
                 output_index=output_index,
+                scale_metres_per_unit=scale_metres_per_unit,
             )
             compile_fixture(document)
         except (ValueError, CompileError) as exc:
             raise FleetError(str(exc), 400) from exc
-        return self.save_fixture(document)
+        return self._settle_one(document, apply=apply, replace_phone=replace_phone)
 
     async def begin_detect(self, fixture_id: str, run_id: object, mode: object) -> dict:
         if mode not in {"binary", "sequential"}:
@@ -566,6 +607,8 @@ class MapperService:
     async def _send(self, mac: str, ip: str, payload: bytes, channels: int, token: int | None = None) -> None:
         if self._sock is None or not payload:
             return
+        if not renderer_sends(self._state(mac).owner):
+            return
         if token is not None and token != self._token:
             return
         sequence = self._sequences.get(mac, 1)
@@ -619,6 +662,7 @@ class MapperService:
             "highlight": highlight,
             "detect": self._detect_view(),
             "error": None,
+            **self._show_fields(),
         }
         self._fanout()
 
@@ -689,6 +733,410 @@ class MapperService:
                 queue.put_nowait(dict(self.status))
             except asyncio.QueueFull:
                 pass
+
+    async def set_owner(self, controller_id: str, owner: str, source: str, playlist: str | None = None) -> dict:
+        mac = self._mac(controller_id)
+        current = self._state(mac)
+        try:
+            change = decide(current, owner, source, playlist)
+        except ValueError as exc:
+            raise FleetError(str(exc), 400) from exc
+        state = change.state
+        if change.snapshot:
+            state = OwnerState(state.owner, state.source, state.playlist, await self._snapshot(mac))
+        if change.restore:
+            await self._restore(mac, current.previous_state)
+        self.fleet.db.save_ownership(mac, state.owner, state.source, state.playlist, state.previous_state)
+        await self._publish_kept()
+        return {
+            "id": mac,
+            "owner": state.owner,
+            "source": state.source,
+            "playlist": state.playlist,
+            "restored": change.restore,
+        }
+
+    def mapper_settings(self) -> dict:
+        return {
+            "playerUrl": self._setting("mapper_player_url", self.settings.player_url),
+            "playerKind": self._setting("mapper_player_kind", self.settings.player_kind) or "xschedule",
+            "playlist": self._setting("mapper_playlist", self.settings.player_playlist),
+            "xlightsShow": self._setting("mapper_xlights_show", self.settings.xlights_show),
+        }
+
+    def update_mapper_settings(self, body: dict) -> dict:
+        if "playerUrl" in body:
+            self.fleet.db.set_setting("mapper_player_url", _http_url(body.get("playerUrl")))
+        if "playerKind" in body:
+            kind = str(body.get("playerKind") or "").strip().lower()
+            if kind not in {"xschedule", "fpp"}:
+                raise FleetError("Player kind must be xschedule or fpp.", 400)
+            self.fleet.db.set_setting("mapper_player_kind", kind)
+        if "playlist" in body:
+            name = body.get("playlist")
+            if not isinstance(name, str):
+                raise FleetError("Playlist name must be text.", 400)
+            self.fleet.db.set_setting("mapper_playlist", name.strip()[:120])
+        if "xlightsShow" in body:
+            show = body.get("xlightsShow")
+            if not isinstance(show, str) or "\x00" in show:
+                raise FleetError("xLights show folder must be a path.", 400)
+            self.fleet.db.set_setting("mapper_xlights_show", show.strip())
+        self._publish_sync()
+        return self.mapper_settings()
+
+    def player(self):
+        if self._player_override is not None:
+            return self._player_override
+        settings = self.mapper_settings()
+        return player_for(settings["playerKind"], settings["playerUrl"], self.fleet.http)
+
+    async def start_show(self, playlist: str) -> dict:
+        name = playlist.strip()
+        if not name:
+            raise FleetError("Name the playlist.", 400)
+        await self.player().start(name)
+        changed = []
+        for mac in self.show_boards():
+            changed.append(await self.set_owner(mac, "xlights", "phone", name))
+        return {"ok": True, "playlist": name, "owner": "xlights", "controllers": [item["id"] for item in changed]}
+
+    async def stop_show(self, playlist: str) -> dict:
+        name = playlist.strip()
+        await self.player().stop(name)
+        released = []
+        for mac in self.show_boards():
+            state = self._state(mac)
+            if state.owner == "xlights" and state.source in {"phone", "hook", "inferred"}:
+                released.append(await self.set_owner(mac, "fleet", "phone", None))
+        return {"ok": True, "playlist": name, "owner": "fleet", "controllers": [item["id"] for item in released]}
+
+    async def xschedule_hook(self, event: str, playlist: str) -> dict:
+        kind = _hook_event(event)
+        name = playlist.strip()
+        touched = []
+        for mac in self.show_boards():
+            state = self._state(mac)
+            if kind == "start":
+                touched.append(await self.set_owner(mac, "xlights", "hook", name or None))
+            elif state.owner == "xlights" and state.source in {"hook", "phone", "inferred"}:
+                touched.append(await self.set_owner(mac, "fleet", "hook", None))
+        return {"ok": True, "event": kind, "playlist": name, "controllers": [item["id"] for item in touched]}
+
+    def show_boards(self) -> list[str]:
+        """Boards this show drives: the xLights controller list, else every board a fixture names."""
+        show = self._setting("mapper_xlights_show", self.settings.xlights_show).strip()
+        registry = list_controllers(self.fleet)
+        if show:
+            path = Path(show).expanduser() / "xlights_networks.xml"
+            if path.is_file():
+                try:
+                    diff = build_diff(path.read_text(encoding="utf-8"), None, registry, [])
+                except (OSError, ValueError):
+                    diff = None
+                if diff is not None:
+                    macs = []
+                    for group in ("placeholders", "ipChanges", "channelDrift", "unchanged"):
+                        rows = diff["controllers"].get(group) or []
+                        if group == "unchanged":
+                            names = set(rows)
+                            for controller in registry:
+                                if controller["name"] in names and controller["id"] not in macs:
+                                    macs.append(controller["id"])
+                            continue
+                        for row in rows:
+                            ident = row.get("id")
+                            if ident and ident not in macs:
+                                macs.append(ident)
+                    if macs:
+                        return macs
+        macs = []
+        for fixture in self.store.list_documents():
+            for run in fixture.get("runs") or []:
+                if not isinstance(run, dict):
+                    continue
+                mac = normalize_mac(str(run.get("controllerId") or ""))
+                if mac and mac not in macs and self.fleet.db.get_device(mac) is not None:
+                    macs.append(mac)
+        if macs:
+            return macs
+        return [controller["id"] for controller in registry]
+
+    def sync_controllers(self, apply: bool, show: str | None = None) -> dict:
+        folder = (show if isinstance(show, str) and show.strip() else self._setting("mapper_xlights_show", self.settings.xlights_show)).strip()
+        if not folder:
+            raise FleetError("Set the xLights show folder before syncing controllers.", 400)
+        try:
+            result = sync_show(Path(folder), list_controllers(self.fleet), self.store.list_documents(), apply=apply)
+        except FileNotFoundError as exc:
+            raise FleetError(str(exc), 404) from exc
+        except ValueError as exc:
+            raise FleetError(str(exc), 400) from exc
+        self._drift = {**drift_summary(result), "checkedAt": utcnow()}
+        self._publish_sync()
+        return result
+
+    def drift_check(self) -> dict | None:
+        folder = self._setting("mapper_xlights_show", self.settings.xlights_show).strip()
+        if not folder:
+            self._drift = None
+            return None
+        path = Path(folder).expanduser()
+        if not (path / "xlights_networks.xml").is_file():
+            self._drift = _drift_problem("xLights show folder has no xlights_networks.xml.")
+            self.fleet.db.set_setting("mapper_xlights_drift_at", str(time.time()))
+            self._publish_sync()
+            return self._drift
+        try:
+            preview = sync_show(path, list_controllers(self.fleet), self.store.list_documents(), apply=False)
+        except (OSError, ValueError) as exc:
+            self._drift = _drift_problem(str(exc))
+        else:
+            self._drift = {**drift_summary(preview), "checkedAt": utcnow()}
+        self.fleet.db.set_setting("mapper_xlights_drift_at", str(time.time()))
+        self.fleet.db.set_setting("mapper_xlights_drift", json.dumps(self._drift, separators=(",", ":")))
+        self._publish_sync()
+        return self._drift
+
+    async def infer_once(self) -> list[dict]:
+        """One pass of the realtime fallback. Two agreeing samples change an owner."""
+        changed = []
+        for device in self.fleet.db.list_devices():
+            if device.get("forgotten") or not device.get("online"):
+                continue
+            mac = device["mac"]
+            try:
+                info = await self.fleet.wled.get_json(device, "/json/info")
+            except WledError:
+                continue
+            state = self._state(mac)
+            local = set(self._local_ips)
+            origin = source_address(str(device["ip"]), self.ddp_port)
+            if origin:
+                local.add(origin)
+            proposal = inferred_owner(info, local, state)
+            previous, streak = self._infer_streak.get(mac, (None, 0))
+            if proposal != previous:
+                streak = 0
+            streak, ready = confirm(streak, proposal)
+            self._infer_streak[mac] = (proposal, streak)
+            if ready is None:
+                continue
+            changed.append(await self.set_owner(mac, ready, "inferred", state.playlist))
+        return changed
+
+    def _settle_show(self, parsed: list[dict], *, apply: bool, replace_phone: bool) -> dict:
+        results = []
+        for item in parsed:
+            if item.get("fixture") is None:
+                results.append({"action": "skipped", "name": item.get("name"), "reason": item.get("skipped")})
+                continue
+            try:
+                compile_fixture(item["fixture"])
+            except CompileError as exc:
+                results.append({"action": "skipped", "name": item.get("name"), "reason": str(exc)})
+                continue
+            results.append(self._settle_one(item["fixture"], apply=apply, replace_phone=replace_phone, envelope=True))
+        return {"results": results}
+
+    def _settle_one(self, document: dict, *, apply: bool, replace_phone: bool, envelope: bool = False) -> dict:
+        existing = self._fixture_named(str(document.get("name") or ""))
+        if existing is None:
+            saved = self.save_fixture(document)
+            if envelope:
+                return {"action": "created", "name": saved["name"], "fixture": saved}
+            return saved
+        phone = phone_capture(existing)
+        proposed = json.loads(json.dumps(document))
+        proposed["id"] = existing["id"]
+        if existing.get("createdAt"):
+            proposed["createdAt"] = existing["createdAt"]
+        proposal = {
+            "action": "proposal",
+            "phoneCapture": phone,
+            "fixtureId": existing["id"],
+            "name": existing["name"],
+            "changes": _fixture_changes(existing, proposed),
+            "proposed": proposed,
+        }
+        if apply and (not phone or replace_phone):
+            saved = self.save_fixture(proposed)
+            if envelope:
+                return {"action": "updated", "name": saved["name"], "fixture": saved, "phoneCapture": phone}
+            return saved
+        return proposal
+
+    def _fixture_named(self, name: str) -> dict | None:
+        wanted = name.strip().lower()
+        if not wanted:
+            return None
+        for document in self.store.list_documents():
+            if str(document.get("name") or "").strip().lower() == wanted:
+                return document
+        return None
+
+    def _state(self, mac: str) -> OwnerState:
+        row = self.fleet.db.get_ownership(mac)
+        if row is None:
+            return OwnerState("fleet", "migration", None, None)
+        return OwnerState(str(row["owner"]), str(row["source"]), row.get("playlist"), row.get("previous_state"))
+
+    def _refuse_foreign(self, mac: str) -> None:
+        owner = self._state(mac).owner
+        if owner == "xlights":
+            raise FleetError("Show running.", 409)
+        if not renderer_sends(owner):
+            raise FleetError("This controller is not driven by the fleet.", 409)
+
+    async def _snapshot(self, mac: str) -> dict | None:
+        device = self.fleet.db.get_device(mac)
+        if device is None:
+            return None
+        try:
+            state = await self.fleet.wled.get_json(device, "/json/state")
+        except WledError:
+            log.warning("Could not read the look on %s before the show", mac)
+            return None
+        if not isinstance(state, dict):
+            return None
+        return look_from_state(state)
+
+    async def _restore(self, mac: str, look: dict | None) -> None:
+        if not look:
+            return
+        device = self.fleet.db.get_device(mac)
+        if device is None:
+            return
+        try:
+            await self.fleet.wled.post_state(device, look)
+        except WledError:
+            log.warning("Could not restore the look on %s", mac)
+
+    def _setting(self, key: str, fallback: str) -> str:
+        stored = self.fleet.db.get_setting(key)
+        if stored is None:
+            return fallback or ""
+        return stored
+
+    def _show_fields(self) -> dict:
+        settings = self.mapper_settings()
+        configured = bool(settings["playerUrl"] and settings["playlist"])
+        return {
+            "playerConfigured": configured,
+            "playlist": settings["playlist"] or None,
+            "showRunning": self._any_show(),
+            "showPlaylist": self._active_playlist(),
+            "xlightsDrift": self._drift,
+        }
+
+    def _any_show(self) -> bool:
+        for controller in list_controllers(self.fleet):
+            if self._state(controller["id"]).owner == "xlights":
+                return True
+        return False
+
+    def _active_playlist(self) -> str | None:
+        names = []
+        for controller in list_controllers(self.fleet):
+            state = self._state(controller["id"])
+            if state.owner == "xlights" and state.playlist and state.playlist not in names:
+                names.append(state.playlist)
+        if not names:
+            return None
+        configured = self.mapper_settings()["playlist"]
+        if configured in names:
+            return configured
+        return names[0]
+
+    async def _publish_kept(self) -> None:
+        self.status = {**self.status, **self._show_fields(), "error": self.status.get("error")}
+        self._fanout()
+
+    def _publish_sync(self) -> None:
+        self.status = {**self.status, **self._show_fields()}
+        self._fanout()
+
+    async def _watch_shows(self) -> None:
+        while not self._stop.is_set():
+            try:
+                await self.infer_once()
+                if time.monotonic() >= self._drift_after:
+                    self.drift_check()
+                    self._drift_after = time.monotonic() + 86400
+                    self._publish_sync()
+            except Exception:
+                log.warning("show watch failed", exc_info=True)
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=3)
+            except asyncio.TimeoutError:
+                pass
+
+
+def migrate_ownership(db, data_dir: Path) -> None:
+    """Remember an owner for every board already in the fleet. Existing boards stay with the fleet."""
+    stamp = data_dir / "migration-backups" / "mapper-ownership.stamp"
+    if stamp.exists():
+        return
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    dest = stamp.parent / "fleet-before-ownership.db"
+    if db.path.exists() and not dest.exists():
+        db.backup_to(dest)
+        log.info("Copied fleet database to %s", dest)
+    for device in db.list_devices():
+        if db.get_ownership(device["mac"]) is None:
+            db.save_ownership(device["mac"], "fleet", "migration", None, None)
+    stamp.write_text(utcnow() + "\n", encoding="utf-8")
+
+
+def _fixture_changes(existing: dict, proposed: dict) -> dict:
+    def controllers(document: dict) -> list[str]:
+        found = []
+        for run in document.get("runs") or []:
+            if isinstance(run, dict):
+                ident = str(run.get("controllerId") or "")
+                if ident and ident not in found:
+                    found.append(ident)
+        return found
+
+    return {
+        "waypoints": {"from": len(existing.get("waypoints") or []), "to": len(proposed.get("waypoints") or [])},
+        "runs": {"from": len(existing.get("runs") or []), "to": len(proposed.get("runs") or [])},
+        "controllers": {"from": controllers(existing), "to": controllers(proposed)},
+    }
+
+
+def _http_url(value: object) -> str:
+    if not isinstance(value, str):
+        raise FleetError("Player URL must be text.", 400)
+    text = value.strip()
+    if not text:
+        return ""
+    if not (text.startswith("http://") or text.startswith("https://")) or " " in text:
+        raise FleetError("Player URL must start with http:// or https://.", 400)
+    return text[:300]
+
+
+def _drift_problem(message: str) -> dict:
+    return {
+        "inSync": False,
+        "error": message,
+        "checkedAt": utcnow(),
+        "placeholders": 0,
+        "missing": 0,
+        "ipChanges": 0,
+        "unassigned": 0,
+        "ambiguous": 0,
+        "channelDrift": 0,
+    }
+
+
+def _hook_event(value: object) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"start", "play", "playing", "playlist start", "playlist started", "started"}:
+        return "start"
+    if text in {"stop", "stopped", "idle", "playlist stop", "playlist stopped"}:
+        return "stop"
+    raise FleetError("Event must be start or stop.", 400)
 
 
 def _find_run(fixture: dict, run_id: str) -> dict:

@@ -169,11 +169,42 @@ final class AppModel: ObservableObject {
         fixtures.first { $0.id == id }
     }
 
+    func showRunning(_ fixture: Fixture) -> Bool {
+        let shows = Set(controllers.filter { $0.showRunning }.map(\.id))
+        return fixture.runs.contains { shows.contains($0.controllerId) }
+    }
+
+    func toggleShow() async {
+        let playlist = status.showPlaylist ?? status.playlist
+        guard let playlist, !playlist.isEmpty else {
+            message = "Name the playlist in the server settings."
+            return
+        }
+        do {
+            if status.showRunning == true {
+                try await client.stopShow(playlist)
+            } else {
+                try await client.startShow(playlist)
+            }
+            controllers = try await client.controllers()
+            message = nil
+        } catch {
+            message = error.localizedDescription
+        }
+    }
+
     private func watch() {
         live?.cancel()
         live = client.watch { [weak self] status in
             Task { @MainActor in
-                self?.status = status
+                guard let model = self else { return }
+                let was = model.status.showRunning
+                model.status = status
+                if status.showRunning != was {
+                    if let listed = try? await model.client.controllers() {
+                        model.controllers = listed
+                    }
+                }
             }
         }
     }
