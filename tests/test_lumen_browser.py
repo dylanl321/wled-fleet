@@ -145,7 +145,9 @@ def test_phone_flow_on_one_screen(house, browser_name):
                 break
             time.sleep(0.05)
         assert painted is not None
-        assert painted[0] == 25
+        # Segment-relative ranges: the output is cleared, then LEDs 25-50 are lit.
+        triples = [tuple(painted[index : index + 3]) for index in range(0, len(painted), 3)]
+        assert any(low == 25 and high == 50 for low, high, _color in triples), triples
         page.get_by_label("Light name").first.fill("Porch rail")
         page.get_by_role("button", name="New zone").first.click()
         page.get_by_label("Zone name").fill("Front of house")

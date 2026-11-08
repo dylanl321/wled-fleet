@@ -161,7 +161,37 @@ class MockDevice:
                 total = max(total, int(segment.get("stop") or 0))
         return total or int(self.cfg["hw"]["led"].get("total") or self.spec.leds)
 
+    def public_state(self) -> dict:
+        """State as WLED reports it: frozen pixel buffers are internal."""
+        state = dict(self.state)
+        state["seg"] = [{key: value for key, value in segment.items() if not key.startswith("_")} for segment in self.state.get("seg") or []]
+        return state
+
+    def reset_segments(self) -> None:
+        """Without a boot preset WLED comes back with one segment per configured output."""
+        segments = []
+        for index, bus in enumerate(self.cfg["hw"]["led"].get("ins") or []):
+            start = int(bus.get("start") or 0)
+            length = int(bus.get("len") or 0)
+            segments.append(
+                {"id": index, "start": start, "stop": start + length, "len": length, "on": True, "bri": 255, "rev": False,
+                 "col": [[255, 160, 60], [40, 0, 0], [0, 0, 0]], "fx": 0, "pal": 0, "sx": 128, "ix": 128}
+            )
+        if segments:
+            self.state["seg"] = segments
+
     def reboot(self) -> None:
+        self.reset_segments()
+        # A rebooting controller drops every WebSocket; clients reconnect and re-read state.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        for client in list(getattr(self, "clients", [])):
+            if loop is not None:
+                loop.create_task(_close_quietly(client))
+        self.clients = []
+        self.live_client = None
         self.down_until = time.monotonic() + self.spec.reboot_seconds
 
     def rebooting(self) -> bool:
@@ -227,12 +257,29 @@ class MockDevice:
                 if segment.get("id") == patch.get("id", 0):
                     target = segment
                     break
+            stop = patch.get("stop")
+            start = patch.get("start", (target or {}).get("start", 0))
+            if isinstance(stop, int) and stop <= (start if isinstance(start, int) else 0):
+                # WLED deletes a segment whose stop is not after its start.
+                if target is not None:
+                    self.state["seg"].remove(target)
+                continue
             if target is None:
-                target = {"id": patch.get("id", 0)}
+                target = {"id": patch.get("id", 0), "on": True, "bri": 255, "col": [[255, 160, 60], [0, 0, 0], [0, 0, 0]], "fx": 0}
                 self.state["seg"].append(target)
             for key, value in patch.items():
-                if key != "id":
-                    target[key] = value
+                if key == "id":
+                    continue
+                if key == "i":
+                    # Individual LEDs are kept per segment and indexed from the segment's start.
+                    target["_pixels"] = paint_individual(target.get("_pixels"), value, int(target.get("stop", 0)) - int(target.get("start", 0)))
+                    target["i"] = value  # echoed for older tests; real WLED does not report "i"
+                    continue
+                target[key] = value
+            if target.get("frz") is False:
+                target.pop("_pixels", None)
+            if "len" in target and isinstance(target.get("start"), int) and isinstance(target.get("stop"), int):
+                target["len"] = target["stop"] - target["start"]
 
     def live_colors(self) -> list[list[int]]:
         count = max(12, min(36, int(self.spec.leds / 4) or 12))
@@ -375,7 +422,36 @@ def render_strip(state: dict, length: int, now: float) -> list[list[int]]:
                 else:
                     rgb = [int(channel * flicker) for channel in primary]
             buffer[start + index] = [max(0, min(255, int(channel * level / 255))) for channel in rgb]
+        frozen = segment.get("_pixels")
+        if segment.get("frz") and isinstance(frozen, list):
+            for index, rgb in enumerate(frozen[:width]):
+                buffer[start + index] = [max(0, min(255, int(channel * level / 255))) for channel in rgb]
     return buffer
+
+
+def paint_individual(pixels: list | None, items: object, length: int) -> list[list[int]]:
+    """WLED's "i": [index, color] pairs or [start, stop, color] ranges, relative to the segment."""
+    out = list(pixels) if isinstance(pixels, list) and len(pixels) == max(0, length) else [[0, 0, 0] for _ in range(max(0, length))]
+    if not isinstance(items, list):
+        return out
+    numbers: list[int] = []
+    for item in items:
+        if isinstance(item, int) and not isinstance(item, bool):
+            numbers.append(abs(item))
+            continue
+        if isinstance(item, str) and len(item) >= 6:
+            rgb = [int(item[0:2], 16), int(item[2:4], 16), int(item[4:6], 16)]
+        elif isinstance(item, list) and len(item) >= 3:
+            rgb = [int(item[0]), int(item[1]), int(item[2])]
+        else:
+            numbers = []
+            continue
+        low = numbers[0] if numbers else 0
+        high = numbers[1] if len(numbers) > 1 and numbers[1] > low else low + 1
+        for index in range(low, min(high, len(out))):
+            out[index] = rgb
+        numbers = []
+    return out
 
 
 def _wave(value: float) -> float:
@@ -455,7 +531,7 @@ def build_app(device: MockDevice) -> FastAPI:
 
     @app.get("/json/state")
     async def get_state() -> dict:
-        return device.state
+        return device.public_state()
 
     @app.post("/json/state")
     async def post_state(request: Request):
@@ -464,7 +540,7 @@ def build_app(device: MockDevice) -> FastAPI:
             return JSONResponse({"error": "denied"}, status_code=401)
         device.apply_state(payload)
         if payload.get("v"):
-            return {"success": True, "state": device.state}
+            return {"success": True, "state": device.public_state()}
         return {"success": True}
 
     @app.post("/json")
@@ -552,7 +628,7 @@ def build_app(device: MockDevice) -> FastAPI:
             return
         device.clients.append(ws)
         try:
-            await ws.send_json({"state": device.state, "info": device.info()})
+            await ws.send_json({"state": device.public_state(), "info": device.info()})
             while True:
                 message = await ws.receive()
                 if message.get("type") == "websocket.disconnect":
@@ -573,10 +649,10 @@ def build_app(device: MockDevice) -> FastAPI:
                         device.live_client = None
                     continue
                 if payload.get("v") and len(payload) == 1:
-                    await ws.send_json({"state": device.state})
+                    await ws.send_json({"state": device.public_state()})
                     continue
                 device.apply_state(payload)
-                outgoing = json.dumps({"success": True, "state": device.state})
+                outgoing = json.dumps({"success": True, "state": device.public_state()})
                 for client in list(device.clients):
                     try:
                         await client.send_text(outgoing)
@@ -590,6 +666,13 @@ def build_app(device: MockDevice) -> FastAPI:
                 device.clients.remove(ws)
 
     return app
+
+
+async def _close_quietly(ws) -> None:
+    try:
+        await ws.close(code=1012)
+    except Exception:
+        pass
 
 
 async def _json_body(request: Request) -> dict:

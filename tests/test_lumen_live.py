@@ -110,7 +110,11 @@ def test_live_fanout_and_segment_writes(tmp_path):
             )
             assert span.status_code == 200
             painted = _wait(lambda: _write_with_pixels(porch_port))
-            assert painted["seg"][0]["i"][0] == 25
+            ranges = painted["seg"][0]["i"]
+            triples = [tuple(ranges[index : index + 3]) for index in range(0, len(ranges), 3)]
+            # Segment-relative, and the rest of the output is cleared first.
+            assert triples[0] == (0, 80, "000000")
+            assert (25, 50, "FFE7B0") in triples
             assert "on" not in painted or painted["seg"][0]["id"] == 0
 
             # The fleet process, not the phone, holds the board socket.
