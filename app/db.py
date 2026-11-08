@@ -639,7 +639,7 @@ class Database:
             self._conn.commit()
 
     def list_lights(self) -> list[dict]:
-        rows = self._all("SELECT * FROM lights ORDER BY position, id")
+        rows = self._all("SELECT * FROM lights ORDER BY position, mac, output_index, start, id")
         for row in rows:
             row["named"] = bool(row["named"])
         return rows

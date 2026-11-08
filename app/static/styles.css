@@ -544,7 +544,8 @@ body[data-route="maintenance"] .status,
 body[data-route="find"] .handle,
 body[data-route="maintenance"] .handle,
 body[data-route="find"] .sheet,
-body[data-route="maintenance"] .sheet { display: none; }
+body[data-route="maintenance"] .sheet,
+body[data-route="outputs"] .sheet { display: none; }
 
 .ghost {
   position: fixed;
@@ -645,3 +646,82 @@ body[data-route="maintenance"] .sheet { display: none; }
 .finder .actions { margin: 14px 0 0; }
 .finder-save { background: var(--text-strong); color: var(--bg); font-weight: 650; }
 .finder-save:disabled { opacity: 0.5; }
+
+
+/* ----- Sheet header chips: copy, paste, all ----------------------------------- */
+
+.head-chips { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.head-chips .chip { margin-left: 0; }
+.clip-chip { display: inline-flex; align-items: center; gap: 6px; padding-left: 4px; }
+.clip-chip canvas { width: 22px; height: 22px; border-radius: 6px; display: block; }
+
+/* ----- Show every output in its own color ------------------------------------- */
+
+.show-outputs {
+  width: 100%;
+  margin: 4px 0 18px;
+  min-height: 52px;
+  padding: 0 16px;
+  border-radius: 14px;
+  background: #1c1c20;
+  color: var(--text-strong);
+  font-size: 16px;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.show-outputs-dots { display: grid; grid-template-columns: repeat(2, 8px); gap: 3px; }
+.show-outputs-dots i { width: 8px; height: 8px; border-radius: 2px; }
+.show-outputs-dots i:nth-child(1) { background: #ff0000; }
+.show-outputs-dots i:nth-child(2) { background: #00ffc0; }
+.show-outputs-dots i:nth-child(3) { background: #8c00ff; }
+.show-outputs-dots i:nth-child(4) { background: #ffe000; }
+
+.legend { margin: 6px var(--margin) 14px; }
+.legend h2 {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+.legend-row { display: flex; align-items: center; gap: 14px; padding: 8px 0; border-top: 1px solid var(--line); }
+.legend-row:first-of-type { border-top: 0; }
+.legend-row strong { color: var(--text-strong); font-size: 16px; font-weight: 600; }
+.legend-row .meta { margin: 2px 0 0; }
+.legend-swatch {
+  width: 64px;
+  height: 22px;
+  border-radius: 7px;
+  flex: none;
+  background: var(--c);
+  box-shadow: 0 0 14px -2px var(--c);
+}
+.legend-swatch.is-dashed { background: repeating-linear-gradient(90deg, var(--c) 0 9px, #050506 9px 15px); }
+.legend-swatch.is-dotted { background: repeating-linear-gradient(90deg, var(--c) 0 4px, #050506 4px 10px); }
+
+/* ----- Consistent spacing and headings on Maintenance and Find ---------------- */
+
+.maint > h2,
+.needs h2 {
+  margin: 22px var(--margin) 6px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--secondary);
+}
+.needs h2 { color: var(--amber); }
+.show-outputs { width: calc(100% - 2 * var(--margin)); margin: 8px var(--margin) 4px; }
+/* Chips in a row sit side by side; only the sheet header pushes its chips right. */
+.zones-row .chip,
+.actions .chip { margin-left: 0; }
+.zones-row { justify-content: flex-start; }
+/* Keep the ruler's last label inside the screen. */
+.ruler .tick:last-child em { left: auto; right: 4px; }
+
+/* The sheet scrolls rather than squeezing its contents: the Look tray keeps its size. */
+.sheet { overflow-y: auto; overscroll-behavior: contain; }
+.sheet > * { flex-shrink: 0; }

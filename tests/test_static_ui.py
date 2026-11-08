@@ -49,3 +49,11 @@ def test_looks_are_drawn_as_led_grids():
     assert "drawMatrix(canvas" in MAIN
     # Colorloop is one color at a time across the strip, not a rainbow.
     assert 'name.includes("colorloop")' in EFFECTS
+
+
+def test_copy_paste_and_show_outputs_are_wired():
+    assert "data-copy" in MAIN and "data-paste" in MAIN
+    assert "function pasteLook()" in MAIN and "commitLook(" in MAIN
+    assert '"/api/lumen/outputs/show"' in MAIN and '"/api/lumen/outputs/hide"' in MAIN
+    # Tapping Home outside a ribbon puts the sheet away.
+    assert "return closeSheet();" in MAIN

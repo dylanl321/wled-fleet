@@ -422,6 +422,13 @@ def render_strip(state: dict, length: int, now: float) -> list[list[int]]:
                 else:
                     rgb = [int(channel * flicker) for channel in primary]
             buffer[start + index] = [max(0, min(255, int(channel * level / 255))) for channel in rgb]
+        grp = max(1, int(segment.get("grp") or 1))
+        spc = max(0, int(segment.get("spc") or 0))
+        if spc:
+            # WLED grouping and spacing: grp lit LEDs, then spc dark ones.
+            for index in range(width):
+                if index % (grp + spc) >= grp:
+                    buffer[start + index] = [0, 0, 0]
         frozen = segment.get("_pixels")
         if segment.get("frz") and isinstance(frozen, list):
             for index, rgb in enumerate(frozen[:width]):
