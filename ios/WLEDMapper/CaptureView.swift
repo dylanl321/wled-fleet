@@ -457,7 +457,7 @@ final class CaptureModel: ObservableObject {
         )
     }
 
-    private func refreshHelixParams() {
+    func refreshHelixParams() {
         guard fixture.runs.indices.contains(active),
               let index = fixture.runs[active].segments.indices.last,
               fixture.runs[active].segments[index].kind == .helix else { return }
