@@ -31,6 +31,20 @@ def mount_mapper(app) -> None:
     async def list_fixtures(request: Request) -> dict:
         return {"fixtures": mapper_of(request).list_fixtures()}
 
+    @router.post("/import")
+    async def import_fixture(request: Request) -> dict:
+        body = await _body(request)
+        text = body.get("text")
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="text is required")
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        filename = body.get("filename") if isinstance(body.get("filename"), str) else ""
+        controller = body.get("controllerId") if isinstance(body.get("controllerId"), str) else ""
+        output = body.get("outputIndex", 0)
+        if isinstance(output, bool) or not isinstance(output, int):
+            raise HTTPException(status_code=400, detail="outputIndex must be an integer")
+        return mapper_of(request).import_document(text, filename, name, controller, output)
+
     @router.post("/fixtures")
     async def create_fixture(request: Request) -> dict:
         body = await _body(request)

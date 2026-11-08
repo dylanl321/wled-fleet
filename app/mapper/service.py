@@ -13,12 +13,13 @@ from app.discovery import normalize_mac
 from app.errors import FleetError, WledError
 from app.mapper.address import absolute_pixels, bus_start, migrate_saved_fixtures
 from app.mapper.advertise import MapperAdvertiser
-from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
+from app.mapper.compile import CompileError, compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
 from app.mapper.effects import EFFECTS, effect_colors
-from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_xmodel
+from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_polyline, xlights_xmodel
 from app.mapper.geom import normalise_points, vec3
+from app.mapper.importers import import_text
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import SchemaError
 from app.mapper.store import FixtureStore
@@ -305,7 +306,34 @@ class MapperService:
                 controller_name=controller,
             )
             return body, "application/xml", f"{filename}.xmodel"
-        raise FleetError("Export format must be csv, json, pixelblaze, or xmodel.", 400)
+        if fmt == "polyline":
+            try:
+                body = xlights_polyline(str(fixture.get("name") or "Fixture"), fixture)
+            except ValueError as exc:
+                raise FleetError(str(exc), 400) from exc
+            return body, "application/xml", f"{filename}.xmodel"
+        raise FleetError("Export format must be csv, json, pixelblaze, xmodel, or polyline.", 400)
+
+    def import_document(
+        self,
+        text: str,
+        filename: str = "",
+        name: str = "",
+        controller_id: str = "",
+        output_index: int = 0,
+    ) -> dict:
+        try:
+            document = import_text(
+                text,
+                filename=filename,
+                name=name,
+                controller_id=controller_id,
+                output_index=output_index,
+            )
+            compile_fixture(document)
+        except (ValueError, CompileError) as exc:
+            raise FleetError(str(exc), 400) from exc
+        return self.save_fixture(document)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

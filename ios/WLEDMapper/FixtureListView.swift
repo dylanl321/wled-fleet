@@ -1,9 +1,19 @@
 import MapperGeometry
 import SwiftUI
+import UniformTypeIdentifiers
+
+private let importTypes: [UTType] = {
+    var types: [UTType] = [.json, .xml, .commaSeparatedText, .plainText, .data]
+    if let xmodel = UTType(filenameExtension: "xmodel") {
+        types.append(xmodel)
+    }
+    return types
+}()
 
 struct FixtureListView: View {
     @EnvironmentObject private var model: AppModel
     @State private var creating = false
+    @State private var importing = false
     @State private var name = ""
     @State private var hint: SurfaceHint = .freeform
 
@@ -42,7 +52,14 @@ struct FixtureListView: View {
                     }
                 }
 
+                if let message = model.message {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(Theme.warn)
+                }
                 BigButton(title: "Map a fixture") { creating = true }
+                BigButton(title: "Import", prominent: false) { importing = true }
+                    .accessibilityIdentifier("fixtures.import")
             }
             .padding(24)
         }
@@ -54,6 +71,41 @@ struct FixtureListView: View {
             newFixture
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: importTypes, allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    Task { await importFile(url) }
+                }
+            case .failure(let error):
+                model.message = error.localizedDescription
+            }
+        }
+    }
+
+    private func importFile(_ url: URL) async {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
+                model.message = "That file is not text."
+                Haptics.warning()
+                return
+            }
+            let saved = try await model.client.importFixture(
+                name: url.deletingPathExtension().lastPathComponent,
+                filename: url.lastPathComponent,
+                text: text
+            )
+            model.replace(saved)
+            model.message = nil
+            model.path.append(.fixture(saved.id))
+            Haptics.success()
+        } catch {
+            model.message = error.localizedDescription
+            Haptics.warning()
         }
     }
 

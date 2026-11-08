@@ -12,6 +12,7 @@ struct FixtureScreen: View {
     @State private var playing: EffectName?
     @State private var confirmLedmap = false
     @State private var confirmShare = false
+    @State private var editing = false
     @State private var more = false
     @State private var started = Date()
 
@@ -53,7 +54,8 @@ struct FixtureScreen: View {
             Button("CSV") { Task { await share("csv") } }
             Button("JSON") { Task { await share("json") } }
             Button("Pixelblaze") { Task { await share("pixelblaze") } }
-            Button("xLights") { Task { await share("xmodel") } }
+            Button("xLights grid") { Task { await share("xmodel") } }
+            Button("xLights line") { Task { await share("polyline") } }
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: Binding(get: { model.shareURL != nil }, set: { if !$0 { model.shareURL = nil } })) {
@@ -62,6 +64,17 @@ struct FixtureScreen: View {
             }
         }
         .sheet(isPresented: $more) { moreSheet }
+        .sheet(isPresented: $editing) {
+            if let fixture {
+                EditFixtureSheet(fixture: fixture) { updated in
+                    model.replace(updated)
+                    if let compiled = try? compile(updated) {
+                        pixels = compiled
+                    }
+                }
+                .environmentObject(model)
+            }
+        }
     }
 
     private var header: some View {
@@ -82,11 +95,24 @@ struct FixtureScreen: View {
                 Text(fixture?.name ?? "Fixture")
                     .font(.title2.weight(.semibold))
                     .foregroundStyle(Theme.ink)
-                Text("\(shownPixels.count) pixels")
-                    .font(.subheadline)
-                    .foregroundStyle(Theme.muted)
+                if let message = model.message, !previewOnly {
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.warn)
+                        .lineLimit(3)
+                } else {
+                    Text("\(shownPixels.count) pixels")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.muted)
+                }
             }
             Spacer()
+            if !previewOnly {
+                Button("Edit") { editing = true }
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                    .accessibilityIdentifier("fixture.edit")
+            }
             Button {
                 more = true
             } label: {
@@ -205,7 +231,14 @@ struct FixtureScreen: View {
 
     private func share(_ format: String) async {
         do {
-            model.shareURL = try await model.client.export(fixture: fixtureId, format: format, width: model.gridWidth, height: model.gridHeight)
+            model.shareURL = try await model.client.export(
+                fixture: fixtureId,
+                format: format,
+                width: model.gridWidth,
+                height: model.gridHeight,
+                depth: model.gridDepth
+            )
+            model.message = nil
         } catch {
             model.message = error.localizedDescription
         }
@@ -223,6 +256,7 @@ struct FixtureScreen: View {
                 Stepper("Grid width \(model.gridWidth)", value: $model.gridWidth, in: 1...128)
                     .foregroundStyle(Theme.ink)
                 Stepper("Grid height \(model.gridHeight)", value: $model.gridHeight, in: 1...128)
+                Stepper("Grid depth \(model.gridDepth)", value: $model.gridDepth, in: 1...32)
                     .foregroundStyle(Theme.ink)
                 Button("Scale pitch to the controller count") {
                     Task { await scalePitches() }

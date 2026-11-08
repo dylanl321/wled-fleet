@@ -144,20 +144,34 @@ final class ServerClient {
         )
     }
 
-    func export(fixture: String, format: String, width: Int, height: Int) async throws -> URL {
-        let path = "/api/mapper/fixtures/\(fixture)/export?format=\(format)&width=\(width)&height=\(height)"
+    func export(fixture: String, format: String, width: Int, height: Int, depth: Int = 1) async throws -> URL {
+        let path = "/api/mapper/fixtures/\(fixture)/export?format=\(format)&width=\(width)&height=\(height)&depth=\(depth)"
         let (data, response) = try await session.data(for: request(path))
         try check(response, data)
         let ext: String
         switch format {
         case "csv": ext = "csv"
-        case "xmodel": ext = "xmodel"
+        case "xmodel", "polyline": ext = "xmodel"
         case "pixelblaze": ext = "json"
         default: ext = "json"
         }
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-\(fixture).\(ext)")
         try data.write(to: url, options: .atomic)
         return url
+    }
+
+    func importFixture(name: String, filename: String, text: String) async throws -> Fixture {
+        struct Body: Encodable {
+            var name: String
+            var filename: String
+            var text: String
+        }
+        return try await send(
+            Fixture.self,
+            path: "/api/mapper/import",
+            method: "POST",
+            body: Body(name: name, filename: filename, text: text)
+        )
     }
 
     func watch(_ onEvent: @escaping (EffectStatus) -> Void) -> Task<Void, Never> {
