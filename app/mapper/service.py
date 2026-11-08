@@ -16,9 +16,13 @@ from app.mapper.advertise import MapperAdvertiser
 from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
-from app.mapper.effects import EFFECTS, effect_colors
-from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_xmodel
+from app.mapper.effects import EFFECTS, targeted_colors
+from app.mapper.align import align_references, distribute_drift, drift_fraction
+from app.mapper.detect import detection_plan as planned_frames
+from app.mapper.detect import is_dark, missing_indices
+from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_polyline, xlights_xmodel
 from app.mapper.geom import normalise_points, vec3
+from app.mapper.importers import import_csv, import_pixelblaze, import_xmodel
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import SchemaError
 from app.mapper.store import FixtureStore
@@ -293,6 +297,13 @@ class MapperService:
             return pixels_json(fixture_id, pixels), "application/json", f"{filename}.json"
         if fmt == "pixelblaze":
             return pixelblaze_map(pixels), "application/json", f"{filename}.pixelblaze.json"
+        if fmt == "polyline":
+            body = xlights_polyline(
+                str(fixture.get("name") or "Fixture"),
+                list(fixture.get("waypoints") or []),
+                sum(int(run.get("pixelCount") or 0) for run in fixture.get("runs") or [] if isinstance(run, dict)),
+            )
+            return body, "application/xml", f"{filename}.xmodel"
         if fmt == "xmodel":
             controller = pixels[0].controller if pixels else ""
             body = xlights_xmodel(
@@ -305,7 +316,129 @@ class MapperService:
                 controller_name=controller,
             )
             return body, "application/xml", f"{filename}.xmodel"
-        raise FleetError("Export format must be csv, json, pixelblaze, or xmodel.", 400)
+        raise FleetError("Export format must be csv, json, pixelblaze, polyline, or xmodel.", 400)
+
+    def detection_plan(self, fixture_id: str, mode: str = "binary", luma: float | None = None) -> dict:
+        if mode not in {"binary", "single"}:
+            raise FleetError("Detection mode must be binary or single.", 400)
+        if luma is not None and not is_dark(luma):
+            raise FleetError("The room is too bright. Turn the other lights off and try again.", 400)
+        pixels = compile_fixture(self._require(fixture_id))
+        frames = planned_frames(len(pixels), mode)
+        return {"pixelCount": len(pixels), "mode": mode, "frames": frames, "darkLimit": 40.0}
+
+    async def show_detection(self, fixture_id: str, ordinals: list[int]) -> dict:
+        fixture = self._require(fixture_id)
+        compiled = compile_fixture(fixture)
+        pixels = absolute_pixels(compiled, self.controllers())
+        wanted = {int(item) for item in ordinals}
+        grouped: dict[str, dict[int, tuple[int, int, int]]] = {}
+        orders: dict[str, int] = {}
+        for ordinal, pixel in enumerate(pixels):
+            grouped.setdefault(pixel.controller, {})[pixel.index] = (255, 255, 255) if ordinal in wanted else (0, 0, 0)
+            if str(_run_order(fixture, pixel.controller)).endswith("W"):
+                orders[pixel.controller] = 4
+            else:
+                orders.setdefault(pixel.controller, 3)
+        for controller, color_map in grouped.items():
+            mac = normalize_mac(controller) or controller
+            device = self.fleet.db.get_device(mac)
+            if device is None:
+                continue
+            channels = orders.get(controller, 3)
+            await self._send(mac, str(device["ip"]), encode_pixels(color_map, channels), channels)
+        return {"lit": len(wanted & set(range(len(pixels))))}
+
+    def accept_detection(self, fixture_id: str, corrections: list[dict], seen: list[int] | None = None) -> dict:
+        fixture = json.loads(json.dumps(self._require(fixture_id)))
+        compiled = compile_fixture(fixture)
+        by_run: dict[str, dict[int, dict]] = {}
+        for item in corrections:
+            if not isinstance(item, dict):
+                continue
+            ordinal = item.get("ordinal")
+            position = item.get("position")
+            if isinstance(ordinal, bool) or not isinstance(ordinal, int):
+                continue
+            if ordinal < 0 or ordinal >= len(compiled) or not isinstance(position, list) or len(position) != 3:
+                continue
+            pixel = compiled[ordinal]
+            for run in fixture.get("runs") or []:
+                if not isinstance(run, dict):
+                    continue
+                if str(run.get("controllerId")) != pixel.controller or int(run.get("outputIndex") or 0) != pixel.output:
+                    continue
+                by_run.setdefault(str(run.get("id")), {})[pixel.index] = {
+                    "index": pixel.index,
+                    "position": [float(position[0]), float(position[1]), float(position[2])],
+                    "source": "detected",
+                }
+        for run in fixture.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            updates = by_run.get(str(run.get("id")))
+            if not updates:
+                continue
+            existing: dict[int, dict] = {}
+            for prior in run.get("pixelCorrections") or []:
+                if isinstance(prior, dict) and isinstance(prior.get("index"), int):
+                    existing[prior["index"]] = prior
+            existing.update(updates)
+            run["pixelCorrections"] = [existing[key] for key in sorted(existing)]
+        saved = self.save_fixture(fixture)
+        observed = set(seen or [])
+        missing = missing_indices(len(compiled), observed) if seen is not None else []
+        return {**saved, "detection": {"missing": missing, "needsViewpoint": bool(missing)}}
+
+    def import_map(self, fmt: str, name: str, text: str) -> dict:
+        try:
+            if fmt == "csv":
+                document = import_csv(text, name)
+            elif fmt == "pixelblaze":
+                document = import_pixelblaze(text, name)
+            elif fmt == "xmodel":
+                document = import_xmodel(text, name)
+            else:
+                raise FleetError("Import format must be csv, pixelblaze, or xmodel.", 400)
+        except (ValueError, SchemaError) as exc:
+            raise FleetError(str(exc), 400) from exc
+        return self.save_fixture(document)
+
+    def align_session(self, fixture_id: str, source_a: list, source_b: list, dest_a: list, dest_b: list) -> dict:
+        fixture = json.loads(json.dumps(self._require(fixture_id)))
+        waypoints = [item for item in fixture.get("waypoints") or [] if isinstance(item, dict)]
+        points = [vec3(item.get("position")) for item in waypoints]
+        moved, _yaw = align_references(vec3(source_a), vec3(source_b), vec3(dest_a), vec3(dest_b), points)
+        for waypoint, point in zip(waypoints, moved):
+            waypoint["position"] = [point.x, point.y, point.z]
+        for run in fixture.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            for item in run.get("pixelCorrections") or []:
+                if not isinstance(item, dict):
+                    continue
+                shifted, _yaw = align_references(vec3(source_a), vec3(source_b), vec3(dest_a), vec3(dest_b), [vec3(item.get("position"))])
+                item["position"] = [shifted[0].x, shifted[0].y, shifted[0].z]
+        return self.save_fixture(fixture)
+
+    def spread_drift(self, fixture_id: str, error: list) -> dict:
+        fixture = json.loads(json.dumps(self._require(fixture_id)))
+        waypoints = [item for item in fixture.get("waypoints") or [] if isinstance(item, dict)]
+        points = [vec3(item.get("position")) for item in waypoints]
+        offset = vec3(error)
+        moved = distribute_drift(points, offset)
+        for waypoint, point in zip(waypoints, moved):
+            waypoint["position"] = [point.x, point.y, point.z]
+        for run in fixture.get("runs") or []:
+            if not isinstance(run, dict):
+                continue
+            count = int(run.get("pixelCount") or 0)
+            for item in run.get("pixelCorrections") or []:
+                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
+                    continue
+                point = vec3(item.get("position")) - offset * drift_fraction(item["index"], count)
+                item["position"] = [point.x, point.y, point.z]
+        return self.save_fixture(fixture)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():
@@ -352,7 +485,13 @@ class MapperService:
                 return
             seconds = _seconds(payload.get("params") or {})
             phase = ((time.monotonic() - payload["started"]) / seconds) % 1.0
-            await self._send_fixture(fixture, effect=payload["name"], phase=phase, token=token)
+            await self._send_fixture(
+                fixture,
+                effect=payload["name"],
+                phase=phase,
+                params=payload.get("params") or {},
+                token=token,
+            )
         self._frames += 1
         now = time.monotonic()
         elapsed = now - self._fps_mark
@@ -390,6 +529,7 @@ class MapperService:
         effect: str | None = None,
         phase: float = 0.0,
         black: bool = False,
+        params: dict | None = None,
         token: int | None = None,
     ) -> None:
         compiled = compile_fixture(fixture)
@@ -398,7 +538,10 @@ class MapperService:
         if token is not None and token != self._token:
             return
         pixels = absolute_pixels(compiled, self.controllers())
-        colors = [(0, 0, 0)] * len(pixels) if black or effect is None else effect_colors(compiled, effect, phase)
+        if black or effect is None:
+            colors = [(0, 0, 0)] * len(pixels)
+        else:
+            colors = targeted_colors(compiled, effect, phase, params, fixture)
         grouped: dict[str, dict[int, tuple[int, int, int]]] = {}
         orders: dict[str, int] = {}
         for pixel, color in zip(pixels, colors):

@@ -160,6 +160,15 @@ struct CaptureScreen: View {
                 Button("Use the measured count") { capture.clearSpanOverride() }
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.muted)
+                Button("Mark this point as a reference") { capture.markReference() }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                Button("Spread drift from the last tap") { capture.spreadDrift() }
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Theme.ink)
+                Text("Tap a reference at the start, tap it again at the end, then spread the drift. A later session asks for both references before new points are added. A saved map is reloaded when you come back.")
+                    .font(.caption)
+                    .foregroundStyle(Theme.muted)
             }
             .padding(.top, 8)
         }
@@ -220,7 +229,8 @@ struct CaptureScreen: View {
             Haptics.warning()
             return
         }
-        capture.place(sample)
+        let added = capture.place(sample)
+        guard added else { return }
         if sample.source == .estimated {
             Haptics.warning()
         } else {
@@ -269,7 +279,9 @@ final class CaptureModel: ObservableObject {
     @Published var nudge = 0.0
     @Published var saving = false
     @Published var notice: String?
+    @Published var aligning = false
     let session = CaptureSession()
+    private var alignTaps: [Vec3] = []
     private var history: [Fixture] = []
     private var active = 0
     private var lastHit: Vec3?
@@ -340,6 +352,13 @@ final class CaptureModel: ObservableObject {
             assign(controller, output: controller.outputs.first)
         }
         active = max(fixture.runs.count - 1, 0)
+        let references = fixture.waypoints.filter { ($0.label ?? "").localizedCaseInsensitiveContains("reference") }
+        if references.count >= 2 && fixture.runs.contains(where: { !$0.segments.isEmpty }) {
+            aligning = true
+            notice = "Re-tap \(references[0].label ?? "the first reference"), then \(references[1].label ?? "the second"), before adding to this map."
+        } else if CaptureSession.hasMap(fixture.id) {
+            notice = "The saved map is loaded. Walk until the old points sit on the lights."
+        }
     }
 
     func assign(_ controller: ControllerRecord, output: ControllerOutput?) {
@@ -356,8 +375,10 @@ final class CaptureModel: ObservableObject {
         fixture.runs[active].colorOrder = chosen.colorOrder
     }
 
-    func place(_ sample: CaptureSample) {
-        guard activeRun != nil else { return }
+    @discardableResult
+    func place(_ sample: CaptureSample) -> Bool {
+        if aligning { return align(sample.position) }
+        guard activeRun != nil else { return false }
         history.append(fixture)
         if history.count > 40 { history.removeFirst() }
         lastHit = sample.position
@@ -387,6 +408,71 @@ final class CaptureModel: ObservableObject {
             radiusMm = radius
             refreshHelixParams()
         }
+        return true
+    }
+
+    func markReference() {
+        guard !fixture.waypoints.isEmpty else { return }
+        let count = fixture.waypoints.filter { ($0.label ?? "").hasPrefix("Reference") }.count
+        fixture.waypoints[fixture.waypoints.count - 1].label = count == 0 ? "Reference A" : "Reference B"
+        Haptics.place()
+    }
+
+    func spreadDrift() {
+        guard fixture.waypoints.count >= 2 else { return }
+        let reference = fixture.waypoints.first { ($0.label ?? "").hasPrefix("Reference") } ?? fixture.waypoints[0]
+        let error = fixture.waypoints[fixture.waypoints.count - 1].position - reference.position
+        let moved = distributeDrift(fixture.waypoints.map(\.position), error: error)
+        for index in fixture.waypoints.indices {
+            fixture.waypoints[index].position = moved[index]
+        }
+        for runIndex in fixture.runs.indices {
+            guard var corrections = fixture.runs[runIndex].pixelCorrections else { continue }
+            for index in corrections.indices {
+                let fraction = driftFraction(corrections[index].index, count: fixture.runs[runIndex].pixelCount)
+                corrections[index].position = corrections[index].position - error * fraction
+            }
+            fixture.runs[runIndex].pixelCorrections = corrections
+        }
+        Haptics.success()
+    }
+
+    private func align(_ position: Vec3) -> Bool {
+        alignTaps.append(position)
+        let references = fixture.waypoints.filter { ($0.label ?? "").localizedCaseInsensitiveContains("reference") }
+        guard alignTaps.count >= 2, references.count >= 2 else {
+            notice = "Now the second reference."
+            return false
+        }
+        let moved = alignReferences(
+            sourceA: references[0].position,
+            sourceB: references[1].position,
+            destA: alignTaps[0],
+            destB: alignTaps[1],
+            points: fixture.waypoints.map(\.position)
+        )
+        for index in fixture.waypoints.indices {
+            fixture.waypoints[index].position = moved.points[index]
+        }
+        for runIndex in fixture.runs.indices {
+            guard var corrections = fixture.runs[runIndex].pixelCorrections else { continue }
+            for index in corrections.indices {
+                let shifted = alignReferences(
+                    sourceA: references[0].position,
+                    sourceB: references[1].position,
+                    destA: alignTaps[0],
+                    destB: alignTaps[1],
+                    points: [corrections[index].position]
+                )
+                corrections[index].position = shifted.points[0]
+            }
+            fixture.runs[runIndex].pixelCorrections = corrections
+        }
+        aligning = false
+        alignTaps = []
+        notice = "The earlier points now line up with those two taps."
+        Haptics.success()
+        return false
     }
 
     func scalePitch() {
@@ -618,6 +704,10 @@ final class CaptureSession: ObservableObject {
         case .notAvailable:
             return 0
         }
+    }
+
+    static func hasMap(_ id: String) -> Bool {
+        FileManager.default.fileExists(atPath: url(id).path)
     }
 
     private static func loadMap(_ id: String) -> ARWorldMap? {

@@ -14,6 +14,7 @@ struct FixtureScreen: View {
     @State private var confirmShare = false
     @State private var more = false
     @State private var started = Date()
+    @State private var target = "Whole fixture"
 
     private var fixture: Fixture? { model.fixture(fixtureId) }
 
@@ -54,6 +55,7 @@ struct FixtureScreen: View {
             Button("JSON") { Task { await share("json") } }
             Button("Pixelblaze") { Task { await share("pixelblaze") } }
             Button("xLights") { Task { await share("xmodel") } }
+            Button("xLights polyline") { Task { await share("polyline") } }
             Button("Cancel", role: .cancel) {}
         }
         .sheet(isPresented: Binding(get: { model.shareURL != nil }, set: { if !$0 { model.shareURL = nil } })) {
@@ -106,6 +108,19 @@ struct FixtureScreen: View {
             effectButton(.fillBottom, "Fill")
             effectButton(.heightRainbow, "Rainbow")
             effectButton(.angleSpin, "Spin")
+            Menu {
+                Button("Whole fixture") { target = "Whole fixture" }
+                Button("Around 1.4 m") { target = "Around 1.4 m" }
+                ForEach(branchLabels, id: \.self) { label in
+                    Button(label) { target = label }
+                }
+            } label: {
+                Image(systemName: "scope")
+                    .frame(width: 52, height: 52)
+                    .foregroundStyle(Theme.ink)
+                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            }
+            .accessibilityIdentifier("effect.target")
             Button {
                 Haptics.undo()
                 playing = nil
@@ -127,7 +142,8 @@ struct FixtureScreen: View {
             playing = name
             started = Date()
             phase = 0
-            Task { try? await model.client.effect(fixture: fixtureId, name: name.rawValue) }
+            let chosen = effectTarget
+            Task { try? await model.client.effect(fixture: fixtureId, name: name.rawValue, branch: chosen.branch, height: chosen.height, band: chosen.band) }
         } label: {
             Text(title)
                 .font(.body.weight(.semibold))
@@ -138,6 +154,21 @@ struct FixtureScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("effect.\(name.rawValue)")
+    }
+
+    private var branchLabels: [String] {
+        var labels: [String] = []
+        for waypoint in fixture?.waypoints ?? [] {
+            guard let label = waypoint.label, !label.isEmpty, !labels.contains(label) else { continue }
+            labels.append(label)
+        }
+        return labels
+    }
+
+    private var effectTarget: (branch: String?, height: Double?, band: Double?) {
+        if target == "Around 1.4 m" { return (nil, 1.4, 0.15) }
+        if target == "Whole fixture" { return (nil, nil, nil) }
+        return (target, nil, nil)
     }
 
     private var shownPixels: [MappedPixel] {
@@ -151,7 +182,8 @@ struct FixtureScreen: View {
     private var colors: [RGB] {
         let name = playing ?? .heightRainbow
         let shown = playing == nil ? 0.22 : phase
-        return effectColors(shownPixels, name, phase: shown)
+        let chosen = effectTarget
+        return targetedColors(shownPixels, name, phase: shown, fixture: fixture, branch: chosen.branch, height: chosen.height, band: chosen.band ?? 0.15)
     }
 
     private func load() async {
@@ -229,6 +261,21 @@ struct FixtureScreen: View {
                 }
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.ink)
+                Button("Edit numbers") {
+                    more = false
+                    model.path.append(.numbers(fixtureId))
+                }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                Button("Find pixels with the camera") {
+                    more = false
+                    model.path.append(.detect(fixtureId))
+                }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                Text("Effects can light the whole fixture, one labelled branch, or a band around 1.4 m. The scope button next to the effects chooses which.")
+                    .font(.callout)
+                    .foregroundStyle(Theme.muted)
                 Text("A ledmap is only for a fixture on one controller. Upload reboots that board. Scaling the pitch, or setting a span's pixel count while capturing, fixes a count that does not match the board.")
                     .font(.callout)
                     .foregroundStyle(Theme.muted)
@@ -239,7 +286,7 @@ struct FixtureScreen: View {
             }
             .padding(24)
         }
-        .presentationDetents([.medium])
+        .presentationDetents([.large])
     }
 }
 

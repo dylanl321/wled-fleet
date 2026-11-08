@@ -64,7 +64,7 @@
       "properties": {
         "id": { "type": "string", "minLength": 1, "maxLength": 80 },
         "position": { "$ref": "#/$defs/vec3" },
-        "source": { "enum": ["tapped", "lidarSnapped", "typed", "imported", "estimated"] },
+        "source": { "enum": ["tapped", "lidarSnapped", "typed", "imported", "estimated", "detected"] },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
         "label": { "type": ["string", "null"], "maxLength": 80 }
       }
@@ -85,6 +85,11 @@
         "pixelCount": { "type": "integer", "minimum": 0 },
         "pitchMm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
         "colorOrder": { "enum": ["GRB", "RGB", "BRG", "RBG", "BGR", "GBR", "GRBW", "RGBW", "BRGW", "RBGW", "BGRW", "GBRW"] },
+        "pixelCorrections": {
+          "type": "array",
+          "description": "Per-pixel positions from camera detection or hand edits. They replace the compiled point for that index and leave the path shape in place.",
+          "items": { "$ref": "#/$defs/pixelCorrection" }
+        },
         "segments": {
           "type": "array",
           "items": { "$ref": "#/$defs/segment" }
@@ -105,6 +110,16 @@
         },
         "params": { "type": "object" },
         "pixelCountOverride": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    },
+    "pixelCorrection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index", "position", "source"],
+      "properties": {
+        "index": { "type": "integer", "minimum": 0 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "source": { "enum": ["detected", "imported", "typed"] }
       }
     }
   }

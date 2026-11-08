@@ -18,6 +18,14 @@ final class ScreenshotTests: XCTestCase {
         capture("preview")
     }
 
+    func testNumbers() {
+        capture("numbers")
+    }
+
+    func testDetect() {
+        capture("detect")
+    }
+
     private func capture(_ name: String) {
         let app = XCUIApplication()
         app.launchArguments = ["-mapperScreenshot", name]
@@ -28,6 +36,10 @@ final class ScreenshotTests: XCTestCase {
             marker = app.staticTexts["Point the phone at the lights."]
         case "fixtures":
             marker = app.staticTexts["Straight 1m"]
+        case "numbers":
+            marker = app.staticTexts["Waypoints"]
+        case "detect":
+            marker = app.staticTexts["Find pixels"]
         default:
             marker = app.staticTexts["Front tree"]
         }

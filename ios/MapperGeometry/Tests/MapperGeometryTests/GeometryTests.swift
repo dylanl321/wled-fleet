@@ -74,7 +74,7 @@ final class GeometryTests: XCTestCase {
 
     func testSchemaAcceptsFixturesAndRejectsATypo() throws {
         let schema = try Data(contentsOf: repoRoot().appendingPathComponent("schema/fixture.v1.json"))
-        for name in ["straight-1m.json", "wall-outline.json", "branching-tree.json", "two-controllers.json"] {
+        for name in ["straight-1m.json", "wall-outline.json", "branching-tree.json", "two-controllers.json", "helix-taps.json", "detected-pixel.json"] {
             let data = try Data(contentsOf: repoRoot().appendingPathComponent("fixtures/\(name)"))
             let errors = try SchemaCheck.validateFixture(data, schemaData: schema)
             XCTAssertEqual(errors, [], name)
@@ -158,6 +158,46 @@ final class GeometryTests: XCTestCase {
         assertClose(circle.radius, 0.08, tol: 1e-6)
         let nudged = nudgeTowardCamera(hit: Vec3(0, 0, 2), camera: .zero, meters: 0.4)
         assertClose(nudged.z, 1.6)
+    }
+
+    func testDetectionRaysAlignmentAndBranches() throws {
+        XCTAssertEqual(frameCount(60), 6)
+        XCTAssertEqual(detectionFrames(4, mode: "binary"), [[1, 3], [2, 3]])
+        XCTAssertEqual(decodeBits([true, false, true]), 5)
+        let frames = [
+            [ImageBlob(10, 10), ImageBlob(40, 10)],
+            [ImageBlob(20, 10), ImageBlob(40, 12)],
+        ]
+        let found = Dictionary(uniqueKeysWithValues: decodeStationary(frames, join: 8).map { ($0.index, $0) })
+        XCTAssertEqual(Set(found.keys), [1, 2, 3])
+        assertClose(found[3]!.v, 11)
+        XCTAssertEqual(missingIndices(4, seen: Set(found.keys)), [0])
+        XCTAssertEqual(brightestBlobs([0, 0, 200, 0, 0] + Array(repeating: 0, count: 15) + [0, 0, 180, 0, 0], width: 5, height: 5, threshold: 40, limit: 4, radius: 1).count, 2)
+        let identity = [[1.0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+        let ray = rayFromPixel(u: 100, v: 50, fx: 200, fy: 200, cx: 100, cy: 50, pose: identity)
+        assertClose(ray.direction.x, 0)
+        XCTAssertLessThan(ray.direction.z, 0)
+        let point = refineWithModel(origin: ray.origin, direction: ray.direction, segments: [(Vec3(0, 0, -2), Vec3(0, 1, -2))])
+        assertClose(point?.z ?? 99, -2)
+        let hit = triangulate(originA: .zero, directionA: Vec3(0, 0, -1), originB: Vec3(1, 0, -1), directionB: Vec3(-1, 0, 0))
+        assertClose(hit.z, -1)
+        let closed = distributeDrift([.zero, Vec3(0, 1, 0), Vec3(0.3, 2, 0)], error: Vec3(0.3, 0, 0))
+        assertClose(closed[1].x, -0.15)
+        assertClose(closed[2].x, 0)
+        let aligned = alignReferences(sourceA: .zero, sourceB: Vec3(0, 0, 1), destA: Vec3(1, 0, 0), destB: Vec3(2, 0, 0), points: [Vec3(0, 0, 1)])
+        assertClose(aligned.points[0].x, 2)
+        let tree = try fixture("branching-tree.json")
+        let pixels = try compile(tree)
+        let colors = targetedColors(pixels, .fillBottom, phase: 1, fixture: tree, branch: "branch 1")
+        let branch = pixels.enumerated().filter { $0.element.segment == "seg-branch-1" }
+        XCTAssertFalse(branch.isEmpty)
+        XCTAssertTrue(branch.allSatisfy { colors[$0.offset] == RGB(255, 244, 230) })
+        XCTAssertEqual(colors[pixels.firstIndex { $0.segment == "seg-trunk" }!], RGB(0, 0, 0))
+        let detected = try compile(fixture("detected-pixel.json"))
+        assertClose(detected[3].x, 0.04)
+        let taps = try compile(fixture("helix-taps.json"))
+        XCTAssertEqual(taps.count, 116)
+        assertClose(taps[0].x, 0.2)
     }
 
     func testFillFromBottom() throws {

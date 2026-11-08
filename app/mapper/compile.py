@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.mapper.geom import (
     EPS,
@@ -186,7 +186,31 @@ def compile_run(fixture_name: str, run: dict, waypoints: dict[str, dict]) -> lis
             ordinal += 1
             index += 1
         cursor = segment_end
-    return pixels
+    return _apply_corrections(pixels, run)
+
+
+def _apply_corrections(pixels: list[Pixel], run: dict) -> list[Pixel]:
+    raw = run.get("pixelCorrections")
+    if not isinstance(raw, list) or not raw:
+        return pixels
+    found: dict[int, Vec3] = {}
+    for item in raw:
+        if not isinstance(item, dict) or isinstance(item.get("index"), bool) or not isinstance(item.get("index"), int):
+            continue
+        position = item.get("position")
+        if not isinstance(position, list) or len(position) != 3:
+            continue
+        found[item["index"]] = vec3(position)
+    if not found:
+        return pixels
+    corrected: list[Pixel] = []
+    for pixel in pixels:
+        point = found.get(pixel.index)
+        if point is None:
+            corrected.append(pixel)
+            continue
+        corrected.append(replace(pixel, x=point.x, y=point.y, z=point.z))
+    return corrected
 
 
 def _pitch_ordinal(cursor: float, pitch_m: float) -> int:

@@ -45,6 +45,44 @@ def pixelblaze_map(pixels: list[Pixel]) -> str:
     return json.dumps([[pixel.x, pixel.y, pixel.z] for pixel in ordered])
 
 
+def xlights_polyline(name: str, waypoints: list[dict], pixel_count: int) -> str:
+    """Poly Line model for a run made of straight pieces.
+
+    Coordinates are metres. SourceVersion stays 2025.12: xLights 2026.04 stores
+    models with a new wrapper and renamed fields, and no 2026.04 file was
+    available here to match. parm1/parm2 are still written because 2026.04
+    still reads the old names. CustomWidth and CustomHeight are included too.
+    """
+    points = []
+    for waypoint in waypoints:
+        position = waypoint.get("position") if isinstance(waypoint, dict) else None
+        if not isinstance(position, list) or len(position) != 3:
+            continue
+        points.append(f"{float(position[0]):.6f},{float(position[1]):.6f},{float(position[2]):.6f}")
+    data = ",".join(points)
+    attributes = {
+        "name": name,
+        "DisplayAs": "Poly Line",
+        "StringType": "RGB Nodes",
+        "PixelCount": str(pixel_count),
+        "NumPoints": str(len(points)),
+        "PointData": data,
+        "parm1": "1",
+        "parm2": str(max(pixel_count, 1)),
+        "CustomWidth": "1",
+        "CustomHeight": str(max(pixel_count, 1)),
+        "Antialias": "1",
+        "PixelSize": "2",
+        "Transparency": "0",
+        "StartSide": "B",
+        "Dir": "L",
+        "StartChannel": "1",
+        "SourceVersion": "2025.12",
+    }
+    body = " ".join(f"{key}={quoteattr(value)}" for key, value in attributes.items())
+    return f'<?xml version="1.0" encoding="UTF-8"?>\n<model {body}></model>\n'
+
+
 def xlights_xmodel(
     name: str,
     pixels: list[Pixel],

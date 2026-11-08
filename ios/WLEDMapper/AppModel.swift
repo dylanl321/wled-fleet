@@ -9,11 +9,14 @@ enum Screenshot: String {
     case connect
     case fixtures
     case preview
+    case numbers
+    case detect
 }
 
 @MainActor
 final class AppModel: ObservableObject {
     static let treeFixtureId = "33333333-3333-4333-8333-333333333333"
+    static let straightFixtureId = "11111111-1111-4111-8111-111111111111"
 
     @Published var serverURL = ""
     @Published var password = ""

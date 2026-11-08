@@ -11,6 +11,48 @@ public struct RGB: Equatable {
     }
 }
 
+public func targetedColors(
+    _ pixels: [MappedPixel],
+    _ name: EffectName,
+    phase: Double,
+    fixture: Fixture? = nil,
+    branch: String? = nil,
+    segment: String? = nil,
+    height: Double? = nil,
+    band: Double = 0.15
+) -> [RGB] {
+    let chosen = pixels.indices.filter { selected(pixels[$0], fixture: fixture, branch: branch, segment: segment, height: height, band: band) }
+    var output = Array(repeating: RGB(0, 0, 0), count: pixels.count)
+    guard !chosen.isEmpty else { return output }
+    let colors = effectColors(chosen.map { pixels[$0] }, name, phase: phase)
+    for (slot, index) in chosen.enumerated() {
+        output[index] = colors[slot]
+    }
+    return output
+}
+
+private func selected(_ pixel: MappedPixel, fixture: Fixture?, branch: String?, segment: String?, height: Double?, band: Double) -> Bool {
+    if let segment, !segment.isEmpty, pixel.segment != segment { return false }
+    if let branch, !branch.isEmpty, !branchMatch(pixel.segment, branch, fixture) { return false }
+    if let height, abs(pixel.y - height) > band { return false }
+    return true
+}
+
+private func branchMatch(_ segmentId: String, _ branch: String, _ fixture: Fixture?) -> Bool {
+    let needle = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if needle.isEmpty || needle == segmentId.lowercased() { return true }
+    guard let fixture else { return segmentId.lowercased().contains(needle) }
+    let labels = Dictionary(uniqueKeysWithValues: fixture.waypoints.map { ($0.id, $0.label ?? "") })
+    for run in fixture.runs {
+        for segment in run.segments where segment.id == segmentId {
+            let names = segment.waypointIds.map { labels[$0] ?? "" }
+            let blob = ([segment.id] + names).joined(separator: " ").lowercased()
+            return blob.contains(needle)
+        }
+    }
+    return segmentId.lowercased().contains(needle)
+}
+
 public func effectColors(_ pixels: [MappedPixel], _ name: EffectName, phase: Double) -> [RGB] {
     guard !pixels.isEmpty else { return [] }
     var cycle = phase.truncatingRemainder(dividingBy: 1)

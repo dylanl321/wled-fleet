@@ -109,16 +109,77 @@ final class ServerClient {
         )
     }
 
-    func effect(fixture: String, name: String) async throws {
+    func effect(fixture: String, name: String, branch: String? = nil, segment: String? = nil, height: Double? = nil, band: Double? = nil) async throws {
         struct Body: Encodable {
             var name: String
-            var params: [String: Double]
+            var params: Params
+
+            struct Params: Encodable {
+                var seconds = 6.0
+                var branch: String?
+                var segment: String?
+                var height: Double?
+                var band: Double?
+
+                init(branch: String?, segment: String?, height: Double?, band: Double?) {
+                    self.branch = branch
+                    self.segment = segment
+                    self.height = height
+                    self.band = band
+                }
+
+                func encode(to encoder: Encoder) throws {
+                    var container = encoder.container(keyedBy: CodingKeys.self)
+                    try container.encode(seconds, forKey: .seconds)
+                    try container.encodeIfPresent(branch, forKey: .branch)
+                    try container.encodeIfPresent(segment, forKey: .segment)
+                    try container.encodeIfPresent(height, forKey: .height)
+                    try container.encodeIfPresent(band, forKey: .band)
+                }
+
+                private enum CodingKeys: String, CodingKey {
+                    case seconds, branch, segment, height, band
+                }
+            }
         }
         let _: Ack = try await send(
             path: "/api/mapper/fixtures/\(fixture)/effect",
             method: "POST",
-            body: Body(name: name, params: ["seconds": 6])
+            body: Body(name: name, params: Body.Params(branch: branch, segment: segment, height: height, band: band))
         )
+    }
+
+    func detectionPlan(fixture: String, mode: String, luma: Double?) async throws -> DetectionPlan {
+        struct Body: Encodable {
+            var mode: String
+            var luma: Double?
+        }
+        return try await send(DetectionPlan.self, path: "/api/mapper/fixtures/\(fixture)/detect/plan", method: "POST", body: Body(mode: mode, luma: luma))
+    }
+
+    func showDetection(fixture: String, pixels: [Int]) async throws {
+        struct Body: Encodable { var pixels: [Int] }
+        let _: Ack = try await send(path: "/api/mapper/fixtures/\(fixture)/detect/frame", method: "POST", body: Body(pixels: pixels))
+    }
+
+    func acceptDetection(fixture: String, corrections: [DetectionCorrection], seen: [Int]) async throws -> (Fixture, [Int]) {
+        struct Body: Encodable {
+            var corrections: [DetectionCorrection]
+            var seen: [Int]
+        }
+        let data = try await raw(path: "/api/mapper/fixtures/\(fixture)/detect/accept", method: "POST", body: Body(corrections: corrections, seen: seen))
+        let fixture = try decoder.decode(Fixture.self, from: data)
+        let note = try decoder.decode(DetectionNote.self, from: data)
+        return (fixture, note.detection.missing)
+    }
+
+    func importMap(format: String, name: String, text: String) async throws -> Fixture {
+        struct Body: Encodable {
+            var format: String
+            var name: String
+            var text: String
+        }
+        return try await send(Fixture.self, path: "/api/mapper/import", method: "POST", body: Body(format: format, name: name, text: text))
     }
 
     func scalePitch(fixture: String, run: String) async throws -> Fixture {
@@ -151,7 +212,7 @@ final class ServerClient {
         let ext: String
         switch format {
         case "csv": ext = "csv"
-        case "xmodel": ext = "xmodel"
+        case "xmodel", "polyline": ext = "xmodel"
         case "pixelblaze": ext = "json"
         default: ext = "json"
         }
@@ -184,13 +245,17 @@ final class ServerClient {
     }
 
     private func send<Response: Decodable, Body: Encodable>(_ type: Response.Type = Response.self, path: String, method: String = "GET", body: Body) async throws -> Response {
+        try decoder.decode(Response.self, from: try await raw(path: path, method: method, body: body))
+    }
+
+    private func raw<Body: Encodable>(path: String, method: String, body: Body) async throws -> Data {
         var req = request(path)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try encoder.encode(body)
         let (data, response) = try await session.data(for: req)
         try check(response, data)
-        return try decoder.decode(Response.self, from: data)
+        return data
     }
 
     private func send<Response: Decodable>(_ type: Response.Type = Response.self, path: String, method: String = "GET") async throws -> Response {
@@ -213,6 +278,24 @@ final class ServerClient {
         let message = detail as? String ?? "The server returned \(http.statusCode)."
         throw ServerFailure(message: message, status: http.statusCode)
     }
+}
+
+struct DetectionPlan: Decodable {
+    var pixelCount: Int
+    var frames: [[Int]]
+}
+
+struct DetectionCorrection: Encodable {
+    var ordinal: Int
+    var position: [Double]
+}
+
+struct DetectionNote: Decodable {
+    struct Info: Decodable {
+        var missing: [Int]
+        var needsViewpoint: Bool
+    }
+    var detection: Info
 }
 
 enum FoundServer: Identifiable, Equatable {

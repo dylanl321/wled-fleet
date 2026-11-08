@@ -18,6 +18,8 @@ struct WLEDMapperApp: App {
 enum Route: Hashable {
     case fixture(String)
     case capture(String)
+    case numbers(String)
+    case detect(String)
 }
 
 struct RootView: View {
@@ -32,6 +34,10 @@ struct RootView: View {
                         FixtureScreen(fixtureId: id)
                     case .capture(let id):
                         CaptureScreen(fixtureId: id)
+                    case .numbers(let id):
+                        NumbersScreen(fixtureId: id)
+                    case .detect(let id):
+                        DetectScreen(fixtureId: id)
                     }
                 }
         }
@@ -47,6 +53,10 @@ struct RootView: View {
             FixtureListView()
         case .preview:
             FixtureScreen(fixtureId: AppModel.treeFixtureId, previewOnly: true)
+        case .numbers:
+            NumbersScreen(fixtureId: AppModel.straightFixtureId, previewOnly: true)
+        case .detect:
+            DetectScreen(fixtureId: AppModel.straightFixtureId, previewOnly: true)
         case nil:
             if model.connected || !model.fixtures.isEmpty {
                 FixtureListView()

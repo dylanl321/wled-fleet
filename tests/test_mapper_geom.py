@@ -38,7 +38,14 @@ def load(name: str) -> dict:
 
 
 def test_regression_fixtures_match_the_schema():
-    for name in ("straight-1m.json", "wall-outline.json", "branching-tree.json", "two-controllers.json"):
+    for name in (
+        "straight-1m.json",
+        "wall-outline.json",
+        "branching-tree.json",
+        "two-controllers.json",
+        "helix-taps.json",
+        "detected-pixel.json",
+    ):
         require_valid(load(name))
 
 

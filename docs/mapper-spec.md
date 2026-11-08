@@ -13,7 +13,34 @@ This is the Nov 7, 2026 specification plus the decisions recorded while building
 - Counter-clockwise, looking up the trunk, is the spec formula with a positive sine term. Clockwise flips that sign.
 - A raycast that misses does not pretend to be a confident tap. The point is stored with source `estimated` and low confidence, drawn in a different colour, and the capture screen says to use Nudge.
 - LiDAR trunk radius uses mesh vertices within ±5 cm of the tap's height and within a short horizontal distance of the tap, then drops points that disagree with the fitted circle.
-- Ledmaps upload only after the user confirms. Effects stay in the app. xLights export is a 2D custom model, with optional depth layers.
+- Ledmaps upload only after the user confirms. Effects stay in the app and on the server. They can target the whole fixture, one labelled branch, or a height band (the example in the spec is 1.4 m).
+- xLights export writes a 2D Custom Model and, when depth is greater than 1, pipe-separated layers. A Poly Line export is available for a run of straight pieces. `SourceVersion` is `2025.12`. xLights 2026.04 was read from the release notes (models became native objects, `parm1`/`parm2` were renamed but the old names are still read, and a 2026 file may wrap the model and drop the `CustomModel` attribute). No 2026.04 `.xmodel` could be obtained here, so the writer was not checked against a real 2026.04 file. `parm1`/`parm2` and `CustomWidth`/`CustomHeight` are both written.
+- Camera detection is approach C. The server lights one pixel at a time, or `ceil(log2 N)` binary frames, over DDP. The phone finds blobs with Vision contours on the camera frame, and falls back to a brightest-blob scan. Rays use the ARKit intrinsics and camera pose. One view intersects the ray with the tapped model. Two views triangulate. A dark-room check runs before the pattern. Pixels that never appear are reported so the user can walk to a second viewpoint. Accepting writes `pixelCorrections` on the run (`source: detected`) without throwing away the path.
+- CSV, Pixelblaze `[[x, y, z]]`, and an xLights custom-model grid import back into a fixture. The numbers screen edits waypoint coordinates and segment radius, turns, and pixel count.
+- Drift: re-tap the opening reference at the end and spread the error along the waypoints. A saved `ARWorldMap` is loaded when the same fixture is captured again. If two waypoints are labelled as references, a later session asks for both of them before new points are added, and the app yaws the old points onto those taps. Roll stays fixed because gravity is up.
+- The build-plan diagram in section 12 was not in the uploaded spec. The phases below are taken from that section and from the resource groups in section 14.
+
+## Phases and the fixtures checked in for them
+
+| Phase | What it is | Fixture |
+| --- | --- | --- |
+| Sanity | One straight metre | `fixtures/straight-1m.json` |
+| 1 | A polyline on one output | `fixtures/wall-outline.json` |
+| 2 | The branching tree, including two controllers | `fixtures/branching-tree.json`, `fixtures/two-controllers.json` |
+| 3 | Surface taps around a helix | `fixtures/helix-taps.json` |
+| 4 | Ledmap and xLights, derived from the fixtures above | the same files |
+| 5 | One pixel moved by detection | `fixtures/detected-pixel.json` |
+
+## Open questions, decided
+
+- The server is the existing Python fleet service. Mapper routes extend it.
+- Capture works on any iOS 17 phone. LiDAR mesh snapping is used when the phone has it; otherwise a plane raycast, then a depth nudge, then an `estimated` point.
+- Each fixture has its own frame. There is no property-wide scene.
+- A ledmap is uploaded only when the user confirms. Save does not reboot a controller.
+- Spatial effects stay in the app and the server. They are not pushed into WLED's effect list.
+- xLights gets a 2D custom model first. Depth layers and a Poly Line model are included. A true 2026.04 file was not available to verify.
+- The product name is WLED Mapper.
+- Tap-to-place is the capture path. Camera detection is the check when a pixel has to be exact.
 
 ---
 
@@ -313,7 +340,7 @@ Native Swift on the phone, the existing server language on the back end, standar
 
 Six phases, each ending in a demo on real lights. Phase 1 is the first thing the user can hold; Phase 2 is the first thing that solves the tree.
 
-&#91;embedded content: build plan · 6 phases, each gated by a live demo\]
+The embedded build-plan diagram was not in the uploaded spec. From the text around it, and from the phase labels in section 14: phase 0 is the server, phase 1 is phone capture of a simple run, phase 2 is the tree and spatial effects, phase 3 is LiDAR and helix fitting, phase 4 is ledmap and xLights, and phase 5 is camera pixel detection. The checked-in fixtures for those phases are listed at the top of this file.
 
 Phase 0 (server) and Phase 1 (app) can be built in parallel by two people, or in that order by one. Nothing after Phase 2 is required for the core promise; Phases 3 to 5 each add a capture shortcut or an export, and their order can change with what the user needs next.
 

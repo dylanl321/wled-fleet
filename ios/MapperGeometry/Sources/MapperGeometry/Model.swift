@@ -13,6 +13,7 @@ public enum WaypointSource: String, Codable {
     case typed
     case imported
     case estimated
+    case detected
 }
 
 public enum SegmentKind: String, Codable, CaseIterable {
@@ -220,6 +221,18 @@ public struct Segment: Equatable, Codable, Identifiable {
     }
 }
 
+public struct PixelCorrection: Equatable, Codable {
+    public var index: Int
+    public var position: Vec3
+    public var source: WaypointSource
+
+    public init(index: Int, position: Vec3, source: WaypointSource) {
+        self.index = index
+        self.position = position
+        self.source = source
+    }
+}
+
 public struct Run: Equatable, Codable, Identifiable {
     public var id: String
     public var controllerId: String
@@ -229,6 +242,7 @@ public struct Run: Equatable, Codable, Identifiable {
     public var pitchMm: Double
     public var colorOrder: String
     public var segments: [Segment]
+    public var pixelCorrections: [PixelCorrection]?
 
     public init(
         id: String,
@@ -238,7 +252,8 @@ public struct Run: Equatable, Codable, Identifiable {
         pixelCount: Int,
         pitchMm: Double,
         colorOrder: String,
-        segments: [Segment]
+        segments: [Segment],
+        pixelCorrections: [PixelCorrection]? = nil
     ) {
         self.id = id
         self.controllerId = controllerId
@@ -248,6 +263,7 @@ public struct Run: Equatable, Codable, Identifiable {
         self.pitchMm = pitchMm
         self.colorOrder = colorOrder
         self.segments = segments
+        self.pixelCorrections = pixelCorrections
     }
 }
 

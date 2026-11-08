@@ -1,9 +1,11 @@
 import MapperGeometry
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct FixtureListView: View {
     @EnvironmentObject private var model: AppModel
     @State private var creating = false
+    @State private var importing = false
     @State private var name = ""
     @State private var hint: SurfaceHint = .freeform
 
@@ -43,6 +45,10 @@ struct FixtureListView: View {
                 }
 
                 BigButton(title: "Map a fixture") { creating = true }
+                Button("Import a map") { importing = true }
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(Theme.muted)
+                    .frame(maxWidth: .infinity)
             }
             .padding(24)
         }
@@ -50,6 +56,9 @@ struct FixtureListView: View {
         .accessibilityIdentifier("screen.fixtures")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
+        .fileImporter(isPresented: $importing, allowedContentTypes: [.commaSeparatedText, .json, .xml, .plainText]) { result in
+            Task { await importFile(result) }
+        }
         .sheet(isPresented: $creating) {
             newFixture
                 .presentationDetents([.medium])
@@ -106,6 +115,28 @@ struct FixtureListView: View {
                 Spacer()
             }
             .padding(24)
+        }
+    }
+
+    private func importFile(_ result: Result<URL, Error>) async {
+        do {
+            let url = try result.get()
+            let access = url.startAccessingSecurityScopedResource()
+            defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let text = try String(contentsOf: url, encoding: .utf8)
+            let format: String
+            switch url.pathExtension.lowercased() {
+            case "csv": format = "csv"
+            case "xmodel", "xml": format = "xmodel"
+            default: format = "pixelblaze"
+            }
+            let saved = try await model.client.importMap(format: format, name: url.deletingPathExtension().lastPathComponent, text: text)
+            model.replace(saved)
+            Haptics.success()
+            model.path.append(.fixture(saved.id))
+        } catch {
+            model.message = error.localizedDescription
+            Haptics.warning()
         }
     }
 }

@@ -91,7 +91,19 @@ private func compileRun(_ name: String, _ run: Run, _ waypoints: [String: Waypoi
         }
         cursor = segmentEnd
     }
-    return pixels
+    return applyCorrections(pixels, run)
+}
+
+private func applyCorrections(_ pixels: [MappedPixel], _ run: Run) -> [MappedPixel] {
+    guard let corrections = run.pixelCorrections, !corrections.isEmpty else { return pixels }
+    let found = Dictionary(uniqueKeysWithValues: corrections.map { ($0.index, $0.position) })
+    return pixels.map { pixel in
+        guard let point = found[pixel.index] else { return pixel }
+        return MappedPixel(
+            fixture: pixel.fixture, controller: pixel.controller, output: pixel.output, index: pixel.index,
+            x: point.x, y: point.y, z: point.z, segment: pixel.segment, u: pixel.u
+        )
+    }
 }
 
 private func pitchOrdinal(_ cursor: Double, _ pitch: Double) -> Int {
