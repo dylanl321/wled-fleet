@@ -22,16 +22,16 @@ final class ScreenshotTests: XCTestCase {
         let app = XCUIApplication()
         app.launchArguments = ["-mapperScreenshot", name]
         app.launch()
-        let marker: String
+        let marker: XCUIElement
         switch name {
         case "connect":
-            marker = "Continue"
+            marker = app.staticTexts["Point the phone at the lights."]
         case "fixtures":
-            marker = "Straight 1m"
+            marker = app.staticTexts["Straight 1m"]
         default:
-            marker = "Front tree"
+            marker = app.staticTexts["Front tree"]
         }
-        XCTAssertTrue(app.staticTexts[marker].waitForExistence(timeout: 20), "\(name) did not show \(marker)")
+        XCTAssertTrue(marker.waitForExistence(timeout: 20), "\(name) did not appear")
         let shot = XCUIScreen.main.screenshot()
         let attachment = XCTAttachment(screenshot: shot)
         attachment.name = name
