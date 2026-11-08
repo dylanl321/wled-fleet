@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "22222222-2222-4222-8222-222222222222",
+  "name": "Wall outline",
+  "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
+  "surfaceHint": "planar",
+  "waypoints": [
+    {"id": "22222222-2222-4222-8222-000000000001", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Bottom left"},
+    {"id": "22222222-2222-4222-8222-000000000002", "position": [1, 0, 0], "source": "typed", "confidence": 1, "label": "Bottom right"},
+    {"id": "22222222-2222-4222-8222-000000000003", "position": [1, 0.5, 0], "source": "typed", "confidence": 1, "label": "Top right"},
+    {"id": "22222222-2222-4222-8222-000000000004", "position": [0, 0.5, 0], "source": "typed", "confidence": 1, "label": "Top left"},
+    {"id": "22222222-2222-4222-8222-000000000005", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Close"}
+  ],
+  "runs": [
+    {
+      "id": "run-wall",
+      "controllerId": "aa:bb:cc:dd:ee:02",
+      "outputIndex": 0,
+      "startIndex": 0,
+      "pixelCount": 180,
+      "pitchMm": 16.666666666666668,
+      "colorOrder": "GRB",
+      "segments": [
+        {
+          "id": "seg-outline",
+          "kind": "polyline",
+          "waypointIds": [
+            "22222222-2222-4222-8222-000000000001",
+            "22222222-2222-4222-8222-000000000002",
+            "22222222-2222-4222-8222-000000000003",
+            "22222222-2222-4222-8222-000000000004",
+            "22222222-2222-4222-8222-000000000005"
+          ],
+          "params": {}
+        }
+      ]
+    }
+  ]
+}

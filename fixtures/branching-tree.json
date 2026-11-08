@@ -1,0 +1,85 @@
+{
+  "schemaVersion": 1,
+  "id": "33333333-3333-4333-8333-333333333333",
+  "name": "Front tree",
+  "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
+  "surfaceHint": "branching",
+  "waypoints": [
+    {"id": "33333333-3333-4333-8333-000000000001", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Trunk base"},
+    {"id": "33333333-3333-4333-8333-000000000002", "position": [0, 1.2, 0], "source": "typed", "confidence": 1, "label": "Trunk top"},
+    {"id": "33333333-3333-4333-8333-000000000003", "position": [0.08, 1.2, 0], "source": "typed", "confidence": 1, "label": "Spiral end"},
+    {"id": "33333333-3333-4333-8333-000000000004", "position": [0, 1.2, 0], "source": "typed", "confidence": 1, "label": "Branch 1 base"},
+    {"id": "33333333-3333-4333-8333-000000000005", "position": [0.6, 1.5, 0.2], "source": "typed", "confidence": 1, "label": "Branch 1 tip"},
+    {"id": "33333333-3333-4333-8333-000000000006", "position": [-0.8, 1.8, 0], "source": "typed", "confidence": 1, "label": "Branch 2 tip"},
+    {"id": "33333333-3333-4333-8333-000000000007", "position": [0, 1.2, 0], "source": "typed", "confidence": 1, "label": "Branch 2 base"}
+  ],
+  "runs": [
+    {
+      "id": "run-trunk",
+      "controllerId": "d1:67:00:00:00:07",
+      "outputIndex": 0,
+      "startIndex": 0,
+      "pixelCount": 141,
+      "pitchMm": 16.666666666666668,
+      "colorOrder": "GRB",
+      "segments": [
+        {
+          "id": "seg-trunk",
+          "kind": "helix",
+          "waypointIds": [
+            "33333333-3333-4333-8333-000000000001",
+            "33333333-3333-4333-8333-000000000002"
+          ],
+          "params": {"turns": 4, "radiusStartMm": 80, "radiusEndMm": 80, "handedness": "ccw"}
+        }
+      ]
+    },
+    {
+      "id": "run-branches",
+      "controllerId": "d1:67:00:00:00:08",
+      "outputIndex": 0,
+      "startIndex": 0,
+      "pixelCount": 102,
+      "pitchMm": 16.666666666666668,
+      "colorOrder": "GRB",
+      "segments": [
+        {
+          "id": "seg-jump-1",
+          "kind": "jump",
+          "waypointIds": [
+            "33333333-3333-4333-8333-000000000003",
+            "33333333-3333-4333-8333-000000000004"
+          ],
+          "params": {}
+        },
+        {
+          "id": "seg-branch-1",
+          "kind": "straight",
+          "waypointIds": [
+            "33333333-3333-4333-8333-000000000004",
+            "33333333-3333-4333-8333-000000000005"
+          ],
+          "params": {}
+        },
+        {
+          "id": "seg-jump-2",
+          "kind": "jump",
+          "waypointIds": [
+            "33333333-3333-4333-8333-000000000005",
+            "33333333-3333-4333-8333-000000000006"
+          ],
+          "params": {}
+        },
+        {
+          "id": "seg-branch-2",
+          "kind": "straight",
+          "waypointIds": [
+            "33333333-3333-4333-8333-000000000006",
+            "33333333-3333-4333-8333-000000000007"
+          ],
+          "params": {}
+        }
+      ]
+    }
+  ]
+}

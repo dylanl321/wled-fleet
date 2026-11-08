@@ -26,3 +26,13 @@ jobs:
       - run: pip install -r requirements-dev.txt -r requirements-ui.txt
       - run: playwright install --with-deps chromium webkit
       - run: pytest tests/test_lumen_browser.py
+
+  geometry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "6.0.3"
+      - run: swift test
+        working-directory: ios/MapperGeometry

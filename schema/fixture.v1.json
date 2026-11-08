@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dylanl321/wled-fleet/schema/fixture.v1.json",
+  "title": "WLED Mapper Fixture",
+  "description": "One fixture document. Version 1. The iOS app and the fleet server both validate against this file.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "origin", "surfaceHint", "waypoints", "runs"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "origin": { "$ref": "#/$defs/origin" },
+    "surfaceHint": { "enum": ["planar", "cylindrical", "branching", "freeform"] },
+    "waypoints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/waypoint" }
+    },
+    "runs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/run" }
+    },
+    "frame": { "$ref": "#/$defs/frame" },
+    "createdAt": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "updatedAt": { "type": "string", "minLength": 1, "maxLength": 40 }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number" }
+    },
+    "quat": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" },
+      "description": "Orientation quaternion as [x, y, z, w]."
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "orientation"],
+      "properties": {
+        "position": { "$ref": "#/$defs/vec3" },
+        "orientation": { "$ref": "#/$defs/quat" }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["translation", "yawRadians"],
+      "description": "Transform applied to raw capture points so the saved fixture has y up, the lowest point at y=0, the centroid on the y axis, and the first pixel facing +z.",
+      "properties": {
+        "translation": { "$ref": "#/$defs/vec3" },
+        "yawRadians": { "type": "number" }
+      }
+    },
+    "waypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "position", "source", "confidence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "source": { "enum": ["tapped", "lidarSnapped", "typed", "imported"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "label": { "type": ["string", "null"], "maxLength": 80 }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "controllerId", "outputIndex", "startIndex", "pixelCount", "pitchMm", "colorOrder", "segments"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "controllerId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "outputIndex": { "type": "integer", "minimum": 0 },
+        "startIndex": { "type": "integer", "minimum": 0 },
+        "pixelCount": { "type": "integer", "minimum": 0 },
+        "pitchMm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
+        "colorOrder": { "enum": ["GRB", "RGB", "BRG", "RBG", "BGR", "GBR", "GRBW", "RGBW", "BRGW", "RBGW", "BGRW", "GBRW"] },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/segment" }
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "waypointIds", "params"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "kind": { "enum": ["straight", "polyline", "helix", "curve", "jump"] },
+        "waypointIds": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        },
+        "params": { "type": "object" },
+        "pixelCountOverride": { "type": ["integer", "null"], "minimum": 0 }
+      }
+    }
+  }
+}

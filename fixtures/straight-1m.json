@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "id": "11111111-1111-4111-8111-111111111111",
+  "name": "Straight 1m",
+  "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
+  "surfaceHint": "freeform",
+  "waypoints": [
+    {"id": "11111111-1111-4111-8111-000000000001", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Start"},
+    {"id": "11111111-1111-4111-8111-000000000002", "position": [0, 1, 0], "source": "typed", "confidence": 1, "label": "End"}
+  ],
+  "runs": [
+    {
+      "id": "run-straight",
+      "controllerId": "aa:bb:cc:dd:ee:01",
+      "outputIndex": 0,
+      "startIndex": 0,
+      "pixelCount": 60,
+      "pitchMm": 16.666666666666668,
+      "colorOrder": "GRB",
+      "segments": [
+        {
+          "id": "seg-straight",
+          "kind": "straight",
+          "waypointIds": [
+            "11111111-1111-4111-8111-000000000001",
+            "11111111-1111-4111-8111-000000000002"
+          ],
+          "params": {}
+        }
+      ]
+    }
+  ]
+}

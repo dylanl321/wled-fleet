@@ -6,3 +6,6 @@ data/
 *.pyc
 agent-tools/
 .DS_Store
+.build/
+*.xcresult
+DerivedData/
