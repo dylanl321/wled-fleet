@@ -268,7 +268,9 @@ button {
   left: 0;
   right: 0;
   bottom: 0;
-  height: var(--sheet, 60%);
+  /* Height and color are separate variables: the script sets the height inline, and
+     sharing one name made the background "60%", which browsers drop, leaving the sheet see-through. */
+  height: var(--sheet-height, 60%);
   background: var(--sheet);
   border-radius: 24px 24px 0 0;
   z-index: 4;
@@ -356,12 +358,37 @@ button {
   min-height: 16px;
 }
 
-.dials { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
-.dial { display: grid; grid-template-columns: 88px 1fr; align-items: center; gap: 8px; color: var(--secondary); font-size: 13px; }
+/* Dials: big thumb-sized tracks, label above, not thin native sliders. */
+.dials { display: flex; flex-direction: column; gap: 14px; margin-top: 10px; }
+.dial { display: flex; flex-direction: column; gap: 6px; color: var(--secondary); font-size: 13px; }
 .dial input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
   width: 100%;
-  accent-color: #d0d0d4;
-  height: 28px;
+  height: 44px;
+  margin: 0;
+  border-radius: 14px;
+  background: linear-gradient(90deg, #2a2a30, #3a3a42);
+  touch-action: none;
+}
+.dial[data-intensity] input[type="range"] { height: 32px; border-radius: 11px; }
+.dial input[type="range"]::-webkit-slider-runnable-track { height: 100%; background: transparent; border: 0; }
+.dial input[type="range"]::-moz-range-track { height: 100%; background: transparent; border: 0; }
+.dial input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 8px;
+  height: 100%;
+  border-radius: 4px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.5);
+}
+.dial input[type="range"]::-moz-range-thumb {
+  width: 8px;
+  height: 100%;
+  border: 0;
+  border-radius: 4px;
+  background: #fff;
 }
 
 .solid {

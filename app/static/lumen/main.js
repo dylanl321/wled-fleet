@@ -340,7 +340,7 @@ function sheet() {
   const many = state.selection.size > MANY ? `<p class="preview-note" data-preview-note>previewing ${state.selection.size} lights</p>` : `<p class="preview-note" data-preview-note></p>`;
   const current = state.draft;
   const intensity = current && String(current.effect).toLowerCase() !== "solid" ? "" : "hidden";
-  return `<section class="sheet" data-paint data-open="${state.sheet ? "true" : "false"}" style="--sheet:${Math.round(state.sheetRatio * 100)}%"><div class="grab" data-grab></div><div class="selection-head" data-selection-head>${minis}<strong>${escapeHtml(selectionLabel())}</strong><button class="chip" data-select-all>All</button></div><div class="look-tray" data-look-tray ${state.solid ? "hidden" : ""}>${looks().map(swatch).join("")}</div><div class="solid" data-solid ${state.solid ? "" : "hidden"}><div class="temp" data-temperature></div><input class="solid-sat" data-saturation type="range" min="0" max="100" value="80" aria-label="Saturation"></div>${many}<div class="dials"><label class="dial">Brightness<input data-dial="bri" type="range" min="0" max="255" value="${chosen[0]?.bri ?? 128}"></label><label class="dial">Speed<input data-dial="sx" type="range" min="0" max="255" value="${current?.sx ?? 128}"></label><label class="dial" data-intensity ${intensity}>Intensity<input data-dial="ix" type="range" min="0" max="255" value="${current?.ix ?? 128}"></label></div><div class="more" data-more ${state.sheetRatio > 0.78 ? "" : "hidden"}><input data-look-name placeholder="Look name" aria-label="Look name"><button class="text-btn" data-save-look>Save as Look</button></div></section>`;
+  return `<section class="sheet" data-paint data-open="${state.sheet ? "true" : "false"}" style="--sheet-height:${Math.round(state.sheetRatio * 100)}%"><div class="grab" data-grab></div><div class="selection-head" data-selection-head>${minis}<strong>${escapeHtml(selectionLabel())}</strong><button class="chip" data-select-all>All</button></div><div class="look-tray" data-look-tray ${state.solid ? "hidden" : ""}>${looks().map(swatch).join("")}</div><div class="solid" data-solid ${state.solid ? "" : "hidden"}><div class="temp" data-temperature></div><input class="solid-sat" data-saturation type="range" min="0" max="100" value="80" aria-label="Saturation"></div>${many}<div class="dials"><label class="dial">Brightness<input data-dial="bri" type="range" min="0" max="255" value="${chosen[0]?.bri ?? 128}"></label><label class="dial">Speed<input data-dial="sx" type="range" min="0" max="255" value="${current?.sx ?? 128}"></label><label class="dial" data-intensity ${intensity}>Intensity<input data-dial="ix" type="range" min="0" max="255" value="${current?.ix ?? 128}"></label></div><div class="more" data-more ${state.sheetRatio > 0.78 ? "" : "hidden"}><input data-look-name placeholder="Look name" aria-label="Look name"><button class="text-btn" data-save-look>Save as Look</button></div></section>`;
 }
 
 function swatch(look) {
@@ -1037,7 +1037,7 @@ function onPointerMove(event) {
     const ratio = Math.max(0.42, Math.min(0.9, state.sheetRatio - dy / window.innerHeight));
     state.sheetRatio = ratio;
     const sheetNode = document.querySelector("[data-paint]");
-    if (sheetNode) sheetNode.style.setProperty("--sheet", `${Math.round(ratio * 100)}%`);
+    if (sheetNode) sheetNode.style.setProperty("--sheet-height", `${Math.round(ratio * 100)}%`);
     const more = document.querySelector("[data-more]");
     if (more) more.hidden = ratio <= 0.78;
   }

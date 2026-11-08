@@ -155,6 +155,9 @@ def test_phone_flow_on_one_screen(house, browser_name):
         page.wait_for_selector("[data-screen='home'][data-active='true'] [data-light-name='Porch rail']")
         page.locator("[data-screen='home'] [data-light-name='Porch rail']").click()
         page.wait_for_selector("[data-paint][data-open='true']")
+        # The sheet must cover Home: an invalid background left it see-through on phones.
+        sheet_bg = page.locator("[data-paint]").evaluate("el => getComputedStyle(el).backgroundColor")
+        assert sheet_bg not in ("transparent", "rgba(0, 0, 0, 0)"), sheet_bg
         assert page.locator("[data-screen='home'][data-active='true']").count() == 1
         assert page.locator("[data-screen][data-active='true']").count() == 1
 

@@ -21,3 +21,9 @@ def test_lumen_has_no_tab_bar_and_the_ribbons_are_the_interface():
     assert 'const CACHE = "lumen-1";' in SW_JS
     assert "self.skipWaiting()" in SW_JS
     assert "self.clients.claim()" in SW_JS
+
+
+def test_sheet_height_does_not_reuse_the_sheet_color_variable():
+    # --sheet is the sheet's color. Setting it to a height made the background invalid.
+    assert "--sheet:" not in MAIN
+    assert "height: var(--sheet-height" in CSS
