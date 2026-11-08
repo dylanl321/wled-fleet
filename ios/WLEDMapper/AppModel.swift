@@ -202,7 +202,7 @@ final class AppModel: ObservableObject {
             connection.stateUpdateHandler = { [weak self] state in
                 guard case .ready = state else { return }
                 guard let endpoint = connection.currentPath?.remoteEndpoint, case .hostPort(let host, let port) = endpoint else { return }
-                let url = "http://\(Self.hostText(host)):\(port.rawValue)"
+                let url = "http://\(hostText(host)):\(port.rawValue)"
                 Task { @MainActor in
                     let item = FoundServer.resolved(name: "WLED Mapper", url: url)
                     if self?.servers.contains(item) == false {
@@ -215,25 +215,25 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private static func hostText(_ host: NWEndpoint.Host) -> String {
-        switch host {
-        case .name(let name, _):
-            return name
-        case .ipv4(let address):
-            return "\(address)"
-        case .ipv6(let address):
-            return "[\(address)]"
-        @unknown default:
-            return ""
-        }
-    }
-
     static func normalize(_ raw: String) -> String {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return text }
         if !text.contains("://") { text = "http://\(text)" }
         while text.hasSuffix("/") { text.removeLast() }
         return text
+    }
+}
+
+private func hostText(_ host: NWEndpoint.Host) -> String {
+    switch host {
+    case .name(let name, _):
+        return name
+    case .ipv4(let address):
+        return "\(address)"
+    case .ipv6(let address):
+        return "[\(address)]"
+    @unknown default:
+        return ""
     }
 }
 
