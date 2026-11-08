@@ -31,6 +31,20 @@ def mount_mapper(app) -> None:
     async def list_fixtures(request: Request) -> dict:
         return {"fixtures": mapper_of(request).list_fixtures()}
 
+    @router.post("/import")
+    async def import_fixture(request: Request) -> dict:
+        body = await _body(request)
+        text = body.get("text")
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="text is required")
+        name = body.get("name") if isinstance(body.get("name"), str) else ""
+        filename = body.get("filename") if isinstance(body.get("filename"), str) else ""
+        controller = body.get("controllerId") if isinstance(body.get("controllerId"), str) else ""
+        output = body.get("outputIndex", 0)
+        if isinstance(output, bool) or not isinstance(output, int):
+            raise HTTPException(status_code=400, detail="outputIndex must be an integer")
+        return mapper_of(request).import_document(text, filename, name, controller, output)
+
     @router.post("/fixtures")
     async def create_fixture(request: Request) -> dict:
         body = await _body(request)
@@ -131,16 +145,6 @@ def mount_mapper(app) -> None:
         ):
             raise HTTPException(status_code=400, detail="seen must be a list of indexes")
         return mapper_of(request).accept_detection(fixture_id, corrections, seen)
-
-    @router.post("/import")
-    async def import_map(request: Request) -> dict:
-        body = await _body(request)
-        fmt = body.get("format")
-        text = body.get("text")
-        name = body.get("name") or "Imported"
-        if not isinstance(fmt, str) or not isinstance(text, str) or not isinstance(name, str):
-            raise HTTPException(status_code=400, detail="format, name, and text are required")
-        return mapper_of(request).import_map(fmt, name, text)
 
     @router.post("/fixtures/{fixture_id}/align")
     async def align(fixture_id: str, request: Request) -> dict:

@@ -11,7 +11,7 @@ import pytest
 from app.mapper.compile import compile_fixture, validate_counts
 from app.mapper.ddp import DDP_MAX_PIXELS, build_packets
 from app.mapper.effects import effect_colors
-from app.mapper.export import pixelblaze_map, pixels_csv, xlights_xmodel
+from app.mapper.export import XLIGHTS_SOURCE_VERSION, pixelblaze_map, pixels_csv, xlights_polyline, xlights_xmodel
 from app.mapper.geom import (
     Vec3,
     catmull_rom,
@@ -337,14 +337,28 @@ def test_exports_and_ddp_chunking():
     assert blaze[0] == [0, 0, 0]
     assert len(blaze) == 60
     model = xlights_xmodel("Straight 1m", pixels, surface_hint="freeform", width=10, height=6)
-    assert 'parm1="10"' in model
-    assert 'parm2="6"' in model
+    assert model.startswith('<?xml version="1.0" encoding="UTF-8"?>')
+    assert '<models type="exported">' in model
+    assert 'DisplayAs="Custom"' in model
+    assert f'SourceVersion="{XLIGHTS_SOURCE_VERSION}"' in model
+    assert 'CustomWidth="10"' in model
+    assert 'CustomHeight="6"' in model
+    assert "parm1" not in model and "parm2" not in model
     assert 'StringType="RGB Nodes"' in model
     assert 'PixelCount="60"' in model
+    assert 'CustomModel="' in model
+    assert "CustomModelCompressed" not in model
     assert ",0," not in model
     assert model.count("|") == 0
     thick = xlights_xmodel("Tree", pixels, surface_hint="freeform", width=10, height=6, depth=2)
     assert 'Depth="2"' in thick
+    assert 'CustomModelCompressed="' in thick
+    assert any(len(part.split(",")) == 4 for part in thick.split('CustomModelCompressed="', 1)[1].split('"', 1)[0].split(";"))
+    line = xlights_polyline("Straight 1m", load("straight-1m.json"))
+    assert 'DisplayAs="Poly Line"' in line
+    assert 'NumPoints="2"' in line
+    assert 'NodesPerString="60"' in line
+    assert f'SourceVersion="{XLIGHTS_SOURCE_VERSION}"' in line
     colors = bytes([index % 256 for index in range(10 * 3)])
     one = build_packets(colors, sequence=1)
     assert one[0][:10] == bytes([0x41, 1, 0x0B, 1, 0, 0, 0, 0, 0, 30])

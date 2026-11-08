@@ -35,7 +35,11 @@ struct RootView: View {
                     case .capture(let id):
                         CaptureScreen(fixtureId: id)
                     case .numbers(let id):
-                        NumbersScreen(fixtureId: id)
+                        if let fixture = model.fixture(id) {
+                            EditFixtureSheet(fixture: fixture) { updated in
+                                model.replace(updated)
+                            }
+                        }
                     case .detect(let id):
                         DetectScreen(fixtureId: id)
                     }
@@ -54,7 +58,9 @@ struct RootView: View {
         case .preview:
             FixtureScreen(fixtureId: AppModel.treeFixtureId, previewOnly: true)
         case .numbers:
-            NumbersScreen(fixtureId: AppModel.straightFixtureId, previewOnly: true)
+            if let fixture = model.fixture(AppModel.straightFixtureId) {
+                EditFixtureSheet(fixture: fixture) { _ in }
+            }
         case .detect:
             DetectScreen(fixtureId: AppModel.straightFixtureId, previewOnly: true)
         case nil:

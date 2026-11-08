@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
     @Published var ledmapSlot = 1
     @Published var gridWidth = 16
     @Published var gridHeight = 16
+    @Published var gridDepth = 1
 
     let client = ServerClient()
     let screenshot: Screenshot?

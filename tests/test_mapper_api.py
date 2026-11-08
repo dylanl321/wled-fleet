@@ -285,7 +285,19 @@ def test_exports_download(tmp_path):
         assert csv_body.headers["content-type"].startswith("text/csv")
         assert csv_body.text.splitlines()[0].startswith("fixture,controller")
         model = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}/export?format=xmodel&width=10&height=6")
-        assert "<custommodel" in model.text
+        assert '<models type="exported">' in model.text
+        assert 'DisplayAs="Custom"' in model.text
         assert 'PixelCount="60"' in model.text
+        line = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}/export?format=polyline")
+        assert 'DisplayAs="Poly Line"' in line.text
         blaze = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}/export?format=pixelblaze")
         assert json.loads(blaze.text)[30][1] == 0.5
+        imported = client.post(
+            "/api/mapper/import",
+            json={"filename": "straight.csv", "name": "From CSV", "text": csv_body.text},
+        )
+        assert imported.status_code == 200, imported.text
+        again = client.get(f"/api/mapper/fixtures/{imported.json()['id']}/pixelmap").json()["pixels"]
+        original = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}/pixelmap").json()["pixels"]
+        assert len(again) == len(original)
+        assert abs(again[30]["y"] - original[30]["y"]) < 1e-5

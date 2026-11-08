@@ -24,7 +24,7 @@ from app.mapper.detect import (
 from app.mapper.effects import targeted_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, xlights_polyline, xlights_xmodel
 from app.mapper.geom import Vec3
-from app.mapper.importers import import_csv, import_pixelblaze, import_xmodel
+from app.mapper.importers import import_text
 from app.mapper.schema_check import require_valid
 from tests.test_mapper_api import _app
 
@@ -92,8 +92,8 @@ def test_ray_refine_and_triangulate():
 def test_import_round_trip_and_polyline():
     straight = load("straight-1m.json")
     pixels = compile_fixture(straight)
-    csv_back = import_csv(pixels_csv(pixels), "Straight again")
-    blaze_back = import_pixelblaze(pixelblaze_map(pixels), "Blaze again")
+    csv_back = import_text(pixels_csv(pixels), filename="straight.csv", name="Straight again")
+    blaze_back = import_text(pixelblaze_map(pixels), filename="straight.json", name="Blaze again")
     for imported in (csv_back, blaze_back):
         compiled = compile_fixture(imported)
         assert len(compiled) == len(pixels)
@@ -102,18 +102,18 @@ def test_import_round_trip_and_polyline():
             assert abs(original.y - again.y) < 1e-3
             assert abs(original.z - again.z) < 1e-3
     model = xlights_xmodel("Straight 1m", pixels, surface_hint="freeform", width=1, height=60, depth=2)
-    assert 'SourceVersion="2025.12"' in model
+    assert 'SourceVersion="2026.19"' in model
     assert 'CustomWidth="1"' in model
     assert 'Depth="2"' in model
-    imported_model = import_xmodel(model, "Grid")
+    imported_model = import_text(model, filename="straight.xmodel", name="Grid")
     recovered = compile_fixture(imported_model)
     assert {pixel.index for pixel in recovered} == set(range(len(pixels)))
     wall = load("wall-outline.json")
-    polyline = xlights_polyline(wall["name"], wall["waypoints"], wall["runs"][0]["pixelCount"])
+    polyline = xlights_polyline(wall["name"], wall)
     assert 'DisplayAs="Poly Line"' in polyline
     assert f'NumPoints="{len(wall["waypoints"])}"' in polyline
     assert "1.000000,0.000000,0.000000" in polyline
-    assert 'SourceVersion="2025.12"' in polyline
+    assert 'SourceVersion="2026.19"' in polyline
 
 
 def test_drift_alignment_and_branch_colors():
@@ -166,7 +166,7 @@ def test_detect_import_and_align_routes(tmp_path):
         pixel = next(item for item in client.get(f"/api/mapper/fixtures/{straight['id']}/pixelmap").json()["pixels"] if item["index"] == 4)
         assert abs(pixel["x"] - 0.02) < 1e-9
         csv_body = client.get(f"/api/mapper/fixtures/{straight['id']}/export?format=csv").text
-        imported = client.post("/api/mapper/import", json={"format": "csv", "name": "From csv", "text": csv_body})
+        imported = client.post("/api/mapper/import", json={"filename": "from.csv", "name": "From csv", "text": csv_body})
         assert imported.status_code == 200
         assert imported.json()["name"] == "From csv"
         polyline = client.get(f"/api/mapper/fixtures/{straight['id']}/export?format=polyline")

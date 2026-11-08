@@ -2,6 +2,14 @@ import MapperGeometry
 import SwiftUI
 import UniformTypeIdentifiers
 
+private let importTypes: [UTType] = {
+    var types: [UTType] = [.json, .xml, .commaSeparatedText, .plainText, .data]
+    if let xmodel = UTType(filenameExtension: "xmodel") {
+        types.append(xmodel)
+    }
+    return types
+}()
+
 struct FixtureListView: View {
     @EnvironmentObject private var model: AppModel
     @State private var creating = false
@@ -44,11 +52,14 @@ struct FixtureListView: View {
                     }
                 }
 
+                if let message = model.message {
+                    Text(message)
+                        .font(.callout)
+                        .foregroundStyle(Theme.warn)
+                }
                 BigButton(title: "Map a fixture") { creating = true }
-                Button("Import a map") { importing = true }
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(Theme.muted)
-                    .frame(maxWidth: .infinity)
+                BigButton(title: "Import", prominent: false) { importing = true }
+                    .accessibilityIdentifier("fixtures.import")
             }
             .padding(24)
         }
@@ -56,13 +67,45 @@ struct FixtureListView: View {
         .accessibilityIdentifier("screen.fixtures")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar(.hidden, for: .navigationBar)
-        .fileImporter(isPresented: $importing, allowedContentTypes: [.commaSeparatedText, .json, .xml, .plainText]) { result in
-            Task { await importFile(result) }
-        }
         .sheet(isPresented: $creating) {
             newFixture
                 .presentationDetents([.medium])
                 .presentationDragIndicator(.visible)
+        }
+        .fileImporter(isPresented: $importing, allowedContentTypes: importTypes, allowsMultipleSelection: false) { result in
+            switch result {
+            case .success(let urls):
+                if let url = urls.first {
+                    Task { await importFile(url) }
+                }
+            case .failure(let error):
+                model.message = error.localizedDescription
+            }
+        }
+    }
+
+    private func importFile(_ url: URL) async {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        do {
+            let data = try Data(contentsOf: url)
+            guard let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) else {
+                model.message = "That file is not text."
+                Haptics.warning()
+                return
+            }
+            let saved = try await model.client.importFixture(
+                name: url.deletingPathExtension().lastPathComponent,
+                filename: url.lastPathComponent,
+                text: text
+            )
+            model.replace(saved)
+            model.message = nil
+            model.path.append(.fixture(saved.id))
+            Haptics.success()
+        } catch {
+            model.message = error.localizedDescription
+            Haptics.warning()
         }
     }
 
@@ -115,28 +158,6 @@ struct FixtureListView: View {
                 Spacer()
             }
             .padding(24)
-        }
-    }
-
-    private func importFile(_ result: Result<URL, Error>) async {
-        do {
-            let url = try result.get()
-            let access = url.startAccessingSecurityScopedResource()
-            defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let text = try String(contentsOf: url, encoding: .utf8)
-            let format: String
-            switch url.pathExtension.lowercased() {
-            case "csv": format = "csv"
-            case "xmodel", "xml": format = "xmodel"
-            default: format = "pixelblaze"
-            }
-            let saved = try await model.client.importMap(format: format, name: url.deletingPathExtension().lastPathComponent, text: text)
-            model.replace(saved)
-            Haptics.success()
-            model.path.append(.fixture(saved.id))
-        } catch {
-            model.message = error.localizedDescription
-            Haptics.warning()
         }
     }
 }

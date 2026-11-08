@@ -37,7 +37,7 @@ final class ScreenshotTests: XCTestCase {
         case "fixtures":
             marker = app.staticTexts["Straight 1m"]
         case "numbers":
-            marker = app.staticTexts["Waypoints"]
+            marker = app.staticTexts["Points"]
         case "detect":
             marker = app.staticTexts["Find pixels"]
         default:

@@ -173,15 +173,6 @@ final class ServerClient {
         return (fixture, note.detection.missing)
     }
 
-    func importMap(format: String, name: String, text: String) async throws -> Fixture {
-        struct Body: Encodable {
-            var format: String
-            var name: String
-            var text: String
-        }
-        return try await send(Fixture.self, path: "/api/mapper/import", method: "POST", body: Body(format: format, name: name, text: text))
-    }
-
     func scalePitch(fixture: String, run: String) async throws -> Fixture {
         try await send(Fixture.self, path: "/api/mapper/fixtures/\(fixture)/runs/\(run)/scale-pitch", method: "POST", body: [String: String]())
     }
@@ -205,8 +196,8 @@ final class ServerClient {
         )
     }
 
-    func export(fixture: String, format: String, width: Int, height: Int) async throws -> URL {
-        let path = "/api/mapper/fixtures/\(fixture)/export?format=\(format)&width=\(width)&height=\(height)"
+    func export(fixture: String, format: String, width: Int, height: Int, depth: Int = 1) async throws -> URL {
+        let path = "/api/mapper/fixtures/\(fixture)/export?format=\(format)&width=\(width)&height=\(height)&depth=\(depth)"
         let (data, response) = try await session.data(for: request(path))
         try check(response, data)
         let ext: String
@@ -219,6 +210,20 @@ final class ServerClient {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("fixture-\(fixture).\(ext)")
         try data.write(to: url, options: .atomic)
         return url
+    }
+
+    func importFixture(name: String, filename: String, text: String) async throws -> Fixture {
+        struct Body: Encodable {
+            var name: String
+            var filename: String
+            var text: String
+        }
+        return try await send(
+            Fixture.self,
+            path: "/api/mapper/import",
+            method: "POST",
+            body: Body(name: name, filename: filename, text: text)
+        )
     }
 
     func watch(_ onEvent: @escaping (EffectStatus) -> Void) -> Task<Void, Never> {

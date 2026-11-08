@@ -13,16 +13,16 @@ from app.discovery import normalize_mac
 from app.errors import FleetError, WledError
 from app.mapper.address import absolute_pixels, bus_start, migrate_saved_fixtures
 from app.mapper.advertise import MapperAdvertiser
-from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
+from app.mapper.compile import CompileError, compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
-from app.mapper.effects import EFFECTS, targeted_colors
 from app.mapper.align import align_references, distribute_drift, drift_fraction
 from app.mapper.detect import detection_plan as planned_frames
 from app.mapper.detect import is_dark, missing_indices
+from app.mapper.effects import EFFECTS, targeted_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_polyline, xlights_xmodel
 from app.mapper.geom import normalise_points, vec3
-from app.mapper.importers import import_csv, import_pixelblaze, import_xmodel
+from app.mapper.importers import import_text
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import SchemaError
 from app.mapper.store import FixtureStore
@@ -297,13 +297,6 @@ class MapperService:
             return pixels_json(fixture_id, pixels), "application/json", f"{filename}.json"
         if fmt == "pixelblaze":
             return pixelblaze_map(pixels), "application/json", f"{filename}.pixelblaze.json"
-        if fmt == "polyline":
-            body = xlights_polyline(
-                str(fixture.get("name") or "Fixture"),
-                list(fixture.get("waypoints") or []),
-                sum(int(run.get("pixelCount") or 0) for run in fixture.get("runs") or [] if isinstance(run, dict)),
-            )
-            return body, "application/xml", f"{filename}.xmodel"
         if fmt == "xmodel":
             controller = pixels[0].controller if pixels else ""
             body = xlights_xmodel(
@@ -316,7 +309,13 @@ class MapperService:
                 controller_name=controller,
             )
             return body, "application/xml", f"{filename}.xmodel"
-        raise FleetError("Export format must be csv, json, pixelblaze, polyline, or xmodel.", 400)
+        if fmt == "polyline":
+            try:
+                body = xlights_polyline(str(fixture.get("name") or "Fixture"), fixture)
+            except ValueError as exc:
+                raise FleetError(str(exc), 400) from exc
+            return body, "application/xml", f"{filename}.xmodel"
+        raise FleetError("Export format must be csv, json, pixelblaze, xmodel, or polyline.", 400)
 
     def detection_plan(self, fixture_id: str, mode: str = "binary", luma: float | None = None) -> dict:
         if mode not in {"binary", "single"}:
@@ -390,20 +389,6 @@ class MapperService:
         missing = missing_indices(len(compiled), observed) if seen is not None else []
         return {**saved, "detection": {"missing": missing, "needsViewpoint": bool(missing)}}
 
-    def import_map(self, fmt: str, name: str, text: str) -> dict:
-        try:
-            if fmt == "csv":
-                document = import_csv(text, name)
-            elif fmt == "pixelblaze":
-                document = import_pixelblaze(text, name)
-            elif fmt == "xmodel":
-                document = import_xmodel(text, name)
-            else:
-                raise FleetError("Import format must be csv, pixelblaze, or xmodel.", 400)
-        except (ValueError, SchemaError) as exc:
-            raise FleetError(str(exc), 400) from exc
-        return self.save_fixture(document)
-
     def align_session(self, fixture_id: str, source_a: list, source_b: list, dest_a: list, dest_b: list) -> dict:
         fixture = json.loads(json.dumps(self._require(fixture_id)))
         waypoints = [item for item in fixture.get("waypoints") or [] if isinstance(item, dict)]
@@ -439,6 +424,27 @@ class MapperService:
                 point = vec3(item.get("position")) - offset * drift_fraction(item["index"], count)
                 item["position"] = [point.x, point.y, point.z]
         return self.save_fixture(fixture)
+
+    def import_document(
+        self,
+        text: str,
+        filename: str = "",
+        name: str = "",
+        controller_id: str = "",
+        output_index: int = 0,
+    ) -> dict:
+        try:
+            document = import_text(
+                text,
+                filename=filename,
+                name=name,
+                controller_id=controller_id,
+                output_index=output_index,
+            )
+            compile_fixture(document)
+        except (ValueError, CompileError) as exc:
+            raise FleetError(str(exc), 400) from exc
+        return self.save_fixture(document)
 
     async def _loop(self) -> None:
         while not self._stop.is_set():

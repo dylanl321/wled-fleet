@@ -18,9 +18,10 @@ struct PixelCloudView: UIViewRepresentable {
     }
 
     func updateUIView(_ view: SCNView, context: Context) {
-        if context.coordinator.signature != pixels.count {
+        if context.coordinator.pixelCount != pixels.count {
             context.coordinator.rebuild(pixels, colors: colors, in: view)
         } else {
+            context.coordinator.move(pixels)
             context.coordinator.paint(colors)
         }
     }
@@ -28,7 +29,7 @@ struct PixelCloudView: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     final class Coordinator {
-        var signature = -1
+        var pixelCount: Int { nodes.count }
         private var nodes: [SCNNode] = []
 
         func rebuild(_ pixels: [MappedPixel], colors: [RGB], in view: SCNView) {
@@ -49,7 +50,12 @@ struct PixelCloudView: UIViewRepresentable {
             scene.rootNode.addChildNode(camera)
             view.scene = scene
             view.pointOfView = camera
-            signature = pixels.count
+        }
+
+        func move(_ pixels: [MappedPixel]) {
+            for (node, pixel) in zip(nodes, pixels) {
+                node.position = SCNVector3(pixel.x, pixel.y, pixel.z)
+            }
         }
 
         func paint(_ colors: [RGB]) {
