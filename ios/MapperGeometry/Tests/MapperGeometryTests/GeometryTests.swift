@@ -39,6 +39,38 @@ final class GeometryTests: XCTestCase {
         XCTAssertTrue(reports.allSatisfy(\.ok))
     }
 
+    func testPixelCountOverrideDoesNotShiftTheNextSegment() throws {
+        for override in [10, 100] {
+            var fixture = try fixture("straight-1m.json")
+            fixture.waypoints.append(
+                Waypoint(id: "11111111-1111-4111-8111-000000000003", position: Vec3(0, 2, 0), source: .typed, confidence: 1, label: "Top")
+            )
+            fixture.runs[0].segments[0].pixelCountOverride = override
+            fixture.runs[0].segments.append(
+                Segment(
+                    id: "upper",
+                    kind: .straight,
+                    waypointIds: ["11111111-1111-4111-8111-000000000002", "11111111-1111-4111-8111-000000000003"],
+                    params: SegmentParams()
+                )
+            )
+            let pixels = try compile(fixture)
+            let first = pixels.filter { $0.segment == "seg-straight" }
+            let upper = pixels.filter { $0.segment == "upper" }
+            XCTAssertEqual(first.count, override)
+            XCTAssertEqual(upper.count, 60)
+            assertClose(first[0].y, 0)
+            assertClose(first[first.count - 1].y, Double(override - 1) / Double(override))
+            assertClose(upper[0].y, 1)
+            assertClose(upper[1].y, 1 + 1.0 / 60.0)
+            assertClose(upper[59].y, 1 + 59.0 / 60.0)
+            XCTAssertEqual(upper.map(\.index), Array(override..<(override + 60)))
+            let heights = upper.map(\.y)
+            XCTAssertEqual(heights, heights.sorted())
+            XCTAssertEqual(Set(heights.map { ($0 * 1_000_000).rounded() / 1_000_000 }).count, 60)
+        }
+    }
+
     func testSchemaAcceptsFixturesAndRejectsATypo() throws {
         let schema = try Data(contentsOf: repoRoot().appendingPathComponent("schema/fixture.v1.json"))
         for name in ["straight-1m.json", "wall-outline.json", "branching-tree.json"] {

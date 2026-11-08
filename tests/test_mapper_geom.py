@@ -93,6 +93,53 @@ def test_tree_helix_and_branches_on_two_outputs():
     assert reports["run-branches"]["placed"] == 102
 
 
+def _two_metre_strip(override: int) -> dict:
+    fixture = load("straight-1m.json")
+    fixture["waypoints"].append(
+        {
+            "id": "11111111-1111-4111-8111-000000000003",
+            "position": [0, 2, 0],
+            "source": "typed",
+            "confidence": 1,
+            "label": "Top",
+        }
+    )
+    run = fixture["runs"][0]
+    run["segments"][0]["pixelCountOverride"] = override
+    run["segments"].append(
+        {
+            "id": "upper",
+            "kind": "straight",
+            "waypointIds": [
+                "11111111-1111-4111-8111-000000000002",
+                "11111111-1111-4111-8111-000000000003",
+            ],
+            "params": {},
+        }
+    )
+    run["pixelCount"] = override + 60
+    return fixture
+
+
+def test_pixel_count_override_does_not_shift_the_next_segment():
+    for override in (10, 100):
+        pixels = compile_fixture(_two_metre_strip(override))
+        first = [pixel for pixel in pixels if pixel.segment == "seg-straight"]
+        upper = [pixel for pixel in pixels if pixel.segment == "upper"]
+        assert len(first) == override
+        assert len(upper) == 60
+        assert first[0].y == pytest.approx(0)
+        assert first[-1].y == pytest.approx((override - 1) / override)
+        assert upper[0].y == pytest.approx(1)
+        assert upper[1].y == pytest.approx(1 + 1 / 60)
+        assert upper[59].y == pytest.approx(1 + 59 / 60)
+        assert [pixel.index for pixel in first] == list(range(override))
+        assert [pixel.index for pixel in upper] == list(range(override, override + 60))
+        heights = [pixel.y for pixel in upper]
+        assert heights == sorted(heights)
+        assert len(set(round(value, 6) for value in heights)) == 60
+
+
 def test_jump_does_not_consume_pixel_indices():
     fixture = load("straight-1m.json")
     run = fixture["runs"][0]

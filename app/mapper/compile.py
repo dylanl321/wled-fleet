@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from app.mapper.geom import (
@@ -153,13 +154,15 @@ def compile_run(fixture_name: str, run: dict, waypoints: dict[str, dict]) -> lis
             continue
         override = segment.get("pixelCountOverride")
         if isinstance(override, int) and not isinstance(override, bool):
+            # Place exactly N pixels on this span, then keep the pitch clock on the
+            # geometric length so the next span is spaced as if this count had not changed.
             for slot in range(override):
                 fraction = 0.0 if override == 0 else slot / override
                 point = position_at(segment, points, fraction)
                 pixels.append(_pixel(fixture_name, run, segment, index, point, fraction))
-                ordinal += 1
                 index += 1
             cursor += length
+            ordinal = _pitch_ordinal(cursor, pitch_m)
             continue
         segment_end = cursor + length
         while ordinal * pitch_m < segment_end - EPS:
@@ -174,6 +177,17 @@ def compile_run(fixture_name: str, run: dict, waypoints: dict[str, dict]) -> lis
             index += 1
         cursor = segment_end
     return pixels
+
+
+def _pitch_ordinal(cursor: float, pitch_m: float) -> int:
+    """Smallest k whose pitch distance is at or past `cursor`.
+
+    A pixel that lands exactly on a segment boundary belongs to the next segment,
+    which is the same rule as the walk `k * pitch < segment_end`.
+    """
+    if pitch_m <= 0:
+        return 0
+    return math.ceil((cursor - EPS) / pitch_m)
 
 
 def _pixel(fixture_name: str, run: dict, segment: dict, index: int, point: Vec3, fraction: float) -> Pixel:

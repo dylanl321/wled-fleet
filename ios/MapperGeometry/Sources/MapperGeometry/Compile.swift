@@ -51,14 +51,18 @@ private func compileRun(_ name: String, _ run: Run, _ waypoints: [String: Waypoi
         let length = try segmentLength(segment, points)
         if segment.kind == .jump { continue }
         if let override = segment.pixelCountOverride {
-            for slot in 0..<override {
-                let fraction = override == 0 ? 0 : Double(slot) / Double(override)
-                let point = try positionAt(segment, points, fraction)
-                pixels.append(pixel(name, run, segment, index, point, fraction))
-                ordinal += 1
-                index += 1
+            // Place exactly N pixels on this span. The pitch clock then jumps to the
+            // geometric end, so the next span is spaced as if this count had not changed.
+            if override > 0 {
+                for slot in 0..<override {
+                    let fraction = Double(slot) / Double(override)
+                    let point = try positionAt(segment, points, fraction)
+                    pixels.append(pixel(name, run, segment, index, point, fraction))
+                    index += 1
+                }
             }
             cursor += length
+            ordinal = pitchOrdinal(cursor, pitch)
             continue
         }
         let segmentEnd = cursor + length
@@ -75,6 +79,11 @@ private func compileRun(_ name: String, _ run: Run, _ waypoints: [String: Waypoi
         cursor = segmentEnd
     }
     return pixels
+}
+
+private func pitchOrdinal(_ cursor: Double, _ pitch: Double) -> Int {
+    if pitch <= 0 { return 0 }
+    return Int(ceil((cursor - 1e-9) / pitch))
 }
 
 private func pointsFor(_ segment: Segment, _ waypoints: [String: Waypoint]) throws -> [Vec3] {
