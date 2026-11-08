@@ -109,8 +109,7 @@ final class DetectCamera: ObservableObject {
         }
         guard let observation = request.results?.first as? VNContoursObservation else { return [] }
         var points: [ImagePoint] = []
-        for index in 0..<observation.topLevelContourCount {
-            guard let contour = try? observation.topLevelContour(at: index) else { continue }
+        for contour in observation.topLevelContours {
             let samples = contour.normalizedPoints
             guard !samples.isEmpty else { continue }
             var sumX = 0.0
