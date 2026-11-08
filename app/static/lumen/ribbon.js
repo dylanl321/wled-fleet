@@ -3,7 +3,6 @@
 import { dominant } from "./effects.js";
 
 const GAMMA = 2.2;
-let noise;
 
 function linear(channel) {
   return (Math.max(0, Math.min(255, channel)) / 255) ** GAMMA;
@@ -59,22 +58,29 @@ export function blendFrames(previous, next, amount) {
   return mixed;
 }
 
-function noiseCanvas() {
-  if (noise) return noise;
-  noise = document.createElement("canvas");
-  noise.width = 64;
-  noise.height = 16;
-  const ctx = noise.getContext("2d");
-  const image = ctx.createImageData(64, 16);
-  for (let i = 0; i < image.data.length; i += 4) {
-    const value = Math.random() * 255;
-    image.data[i] = value;
-    image.data[i + 1] = value;
-    image.data[i + 2] = value;
-    image.data[i + 3] = 255;
-  }
-  ctx.putImageData(image, 0, 0);
-  return noise;
+// LED values are PWM duty, which the eye sees as much brighter than the same
+// number on a screen: drawn as-is, a half-bright amber strip looks brown. Keep
+// each LED's hue and saturation (its color at full output), and map only its
+// level through a perceptual curve, so a dimmed strip stays the same color, less
+// bright, the way it looks in the room.
+function toScreen(color) {
+  const level = Math.max(color[0], color[1], color[2]);
+  if (level <= 0) return [0, 0, 0];
+  const shown = 255 * (level / 255) ** 0.5;
+  const scale = shown / level;
+  return [Math.round(color[0] * scale), Math.round(color[1] * scale), Math.round(color[2] * scale)];
+}
+
+// A slow, smooth luminance drift (about 3 %) so a solid strip still feels lit,
+// without grain: no random texture is drawn over the ribbon.
+function shimmer(index, count, now) {
+  const x = count > 1 ? index / (count - 1) : 0;
+  const t = now / 1000;
+  return 1 + 0.03 * Math.sin(t * 0.7 + x * 5.1) * Math.sin(t * 0.43 + x * 2.3 + 1.7);
+}
+
+function lit(color, factor) {
+  return `rgb(${Math.min(255, Math.round(color[0] * factor))},${Math.min(255, Math.round(color[1] * factor))},${Math.min(255, Math.round(color[2] * factor))})`;
 }
 
 function ensureSize(canvas) {
@@ -112,7 +118,7 @@ function paintPixels(ctx, pixels, width, height, now, flow) {
     const gradient = ctx.createLinearGradient(0, 0, width, 0);
     pixels.forEach((color, index) => {
       const stop = pixels.length === 1 ? 0 : index / (pixels.length - 1);
-      gradient.addColorStop(stop, `rgb(${color[0]},${color[1]},${color[2]})`);
+      gradient.addColorStop(stop, lit(color, shimmer(index, pixels.length, now)));
     });
     ctx.fillStyle = gradient;
     ctx.fillRect(0, 0, width, height);
@@ -137,16 +143,46 @@ function paintPixels(ctx, pixels, width, height, now, flow) {
     ctx.fillRect(edge - 18, 0, 26, height);
     ctx.restore();
   }
+  // A soft core of the strip's own color, faded smoothly to nothing above and
+  // below, so the ribbon reads as emitted light rather than painted plastic.
+  if (!short) {
+    const source = ctx.canvas;
+    let glow = source._core;
+    if (!glow) {
+      glow = document.createElement("canvas");
+      source._core = glow;
+    }
+    if (glow.width !== source.width || glow.height !== source.height) {
+      glow.width = source.width;
+      glow.height = source.height;
+    }
+    const gctx = glow.getContext("2d");
+    gctx.setTransform(1, 0, 0, 1, 0, 0);
+    gctx.globalCompositeOperation = "copy";
+    gctx.drawImage(source, 0, 0);
+    gctx.globalCompositeOperation = "destination-in";
+    const mask = gctx.createLinearGradient(0, 0, 0, glow.height);
+    mask.addColorStop(0, "rgba(0,0,0,0)");
+    mask.addColorStop(0.5, "rgba(0,0,0,1)");
+    mask.addColorStop(1, "rgba(0,0,0,0)");
+    gctx.fillStyle = mask;
+    gctx.fillRect(0, 0, glow.width, glow.height);
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalCompositeOperation = "screen";
+    ctx.globalAlpha = 0.3;
+    ctx.drawImage(glow, 0, 0);
+    ctx.restore();
+  }
+  // Light on a surface: brightest along the middle, falling off gently at both
+  // edges. No white highlight, which read as a lacquered plank.
   const falloff = ctx.createLinearGradient(0, 0, 0, height);
-  falloff.addColorStop(0, "rgba(255,255,255,0.16)");
-  falloff.addColorStop(0.42, "rgba(255,255,255,0)");
-  falloff.addColorStop(1, "rgba(0,0,0,0.42)");
+  falloff.addColorStop(0, "rgba(0,0,0,0.22)");
+  falloff.addColorStop(0.35, "rgba(0,0,0,0)");
+  falloff.addColorStop(0.65, "rgba(0,0,0,0)");
+  falloff.addColorStop(1, "rgba(0,0,0,0.26)");
   ctx.fillStyle = falloff;
   ctx.fillRect(0, 0, width, height);
-  ctx.globalAlpha = 0.03;
-  const drift = (now / 40) % 64;
-  ctx.drawImage(noiseCanvas(), -drift, 0, width + 64, height);
-  ctx.globalAlpha = 1;
 }
 
 export function drawRibbon(canvas, pixels, options = {}) {
@@ -154,7 +190,7 @@ export function drawRibbon(canvas, pixels, options = {}) {
   const { width, height, dpr } = ensureSize(canvas);
   const ctx = canvas.getContext("2d", { alpha: false });
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  const fitted = downsample(pixels, Math.max(1, Math.round(width)));
+  const fitted = downsample(pixels, Math.max(1, Math.round(width))).map(toScreen);
   let off = canvas._off;
   if (!off) {
     off = document.createElement("canvas");

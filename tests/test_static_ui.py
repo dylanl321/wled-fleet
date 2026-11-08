@@ -27,3 +27,18 @@ def test_sheet_height_does_not_reuse_the_sheet_color_variable():
     # --sheet is the sheet's color. Setting it to a height made the background invalid.
     assert "--sheet:" not in MAIN
     assert "height: var(--sheet-height" in CSS
+
+
+RIBBON = (ROOT / "app" / "static" / "lumen" / "ribbon.js").read_text(encoding="utf-8")
+EFFECTS = (ROOT / "app" / "static" / "lumen" / "effects.js").read_text(encoding="utf-8")
+
+
+def test_ribbons_draw_light_not_wood():
+    # LED levels are encoded for the screen, so a dimmed amber strip is not brown.
+    assert "map(toScreen)" in RIBBON
+    # No stretched random texture (it read as wood grain) and no white lacquer highlight.
+    assert "noiseCanvas" not in RIBBON
+    assert "rgba(255,255,255,0.16)" not in RIBBON
+    # Candle and fire flicker in smooth patches, not per-LED stripes toward dark red.
+    assert "index * 1.7" not in EFFECTS
+    assert "function smooth(" in EFFECTS

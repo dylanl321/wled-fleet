@@ -45,6 +45,15 @@ function hash(n) {
   return x - Math.floor(x);
 }
 
+// Value noise that changes smoothly from one LED to the next and over time, so
+// flicker looks like soft patches of light rather than stripes.
+function smooth(x, seed) {
+  const base = Math.floor(x);
+  let f = x - base;
+  f = f * f * (3 - 2 * f);
+  return hash(base + seed * 57.3) * (1 - f) + hash(base + 1 + seed * 57.3) * f;
+}
+
 function paletteColor(look, phase, clock) {
   const name = String(look.palette || "").toLowerCase();
   if (name.includes("rainbow")) return hue(phase + clock * 0.05);
@@ -93,9 +102,15 @@ export function renderEffect(look, count, now) {
     } else if (name.includes("rain")) {
       const drop = hash(Math.floor(clock * 3) * 13 + index) > 0.82;
       rgb = drop ? [180, 210, 255] : mix(secondary, primary, 0.15);
-    } else if (name.includes("candle") || name.includes("flicker") || name.includes("ember") || name.includes("fire")) {
-      const flick = 0.45 + 0.55 * Math.abs(Math.sin(clock * 9 + index * 1.7) * Math.sin(clock * 3 + index));
-      rgb = mix([40, 0, 0], primary, flick);
+    } else if (name.includes("candle") || name.includes("flicker")) {
+      // A candle flickers in broad, drifting patches and never drops far: dim to
+      // a deeper orange, not toward brown.
+      const flick = 0.62 + 0.38 * smooth(phase * 3.5 + clock * 1.6, 1) * (0.7 + 0.3 * smooth(clock * 4, 2));
+      rgb = mix([primary[0], primary[1] * 0.55, primary[2] * 0.3], primary, flick).map((c) => clamp(c * (0.75 + 0.25 * flick)));
+    } else if (name.includes("ember") || name.includes("fire")) {
+      // Heat drifts along the strip: deep red where it is cool, gold where it is hot.
+      const heat = smooth(phase * 5 + clock * 0.9, 3) * 0.8 + 0.2 * smooth(phase * 13 - clock * 2.2, 4);
+      rgb = heat < 0.5 ? mix([150, 18, 0], [255, 70, 0], heat * 2) : mix([255, 70, 0], [255, 190, 60], (heat - 0.5) * 2);
     } else if (name.includes("breathe") || name.includes("pulse") || name.includes("heartbeat")) {
       const beat = name.includes("heart")
         ? Math.pow(Math.max(0, Math.sin(clock * 3)), 8)
