@@ -15,7 +15,12 @@ struct FixtureScreen: View {
     @State private var editing = false
     @State private var more = false
     @State private var started = Date()
-    @State private var target = "Whole fixture"
+    @State private var target = "all"
+    @State private var limitHeight = false
+    @State private var heightM = 1.4
+    @State private var limitAlong = false
+    @State private var along = 0.5
+    @State private var pushAddress: Task<Void, Never>?
 
     private var fixture: Fixture? { model.fixture(fixtureId) }
 
@@ -27,6 +32,7 @@ struct FixtureScreen: View {
                 PixelCloudView(pixels: shownPixels, colors: colors)
                     .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     .accessibilityIdentifier("screen.preview")
+                if showsBranches { targetMenu }
                 effects
                 if !previewOnly {
                     HStack(spacing: 10) {
@@ -46,6 +52,11 @@ struct FixtureScreen: View {
         .toolbar(.hidden, for: .navigationBar)
         .task(id: fixture?.id) { await load() }
         .task(id: playing) { await animate() }
+        .onChange(of: target) { _, _ in schedulePush() }
+        .onChange(of: limitHeight) { _, _ in schedulePush() }
+        .onChange(of: heightM) { _, _ in schedulePush() }
+        .onChange(of: limitAlong) { _, _ in schedulePush() }
+        .onChange(of: along) { _, _ in schedulePush() }
         .confirmationDialog("Send a ledmap? The controller reboots.", isPresented: $confirmLedmap, titleVisibility: .visible) {
             Button("By height") { Task { await push("height") } }
             Button("2D grid") { Task { await push("grid") } }
@@ -128,24 +139,67 @@ struct FixtureScreen: View {
         }
     }
 
+    private var showsBranches: Bool {
+        fixture?.surfaceHint == .branching || fixture?.groups?.contains { $0.role == .branch } == true
+    }
+
+    private var address: EffectAddress {
+        EffectAddress(
+            target: target,
+            heightM: limitHeight ? heightM : nil,
+            branchU: limitAlong ? along : nil,
+            bandM: limitHeight ? 0.05 : nil,
+            bandU: limitAlong ? 0.05 : nil
+        )
+    }
+
+    private var targetTitle: String {
+        switch target {
+        case "all": return "All"
+        case "branches": return "Branches"
+        case "trunk": return "Trunk"
+        default:
+            return fixture?.groups?.first { $0.id == target }?.name ?? "All"
+        }
+    }
+
+    private var targetMenu: some View {
+        Menu {
+            Button("All") { target = "all" }
+            Button("Branches") { target = "branches" }
+            ForEach(fixture?.groups ?? []) { group in
+                Button(group.name) { target = group.id }
+            }
+        } label: {
+            Text(targetTitle)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(Theme.card, in: Capsule())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier("effect.target")
+    }
+
+    private var effectNames: [EffectName] {
+        showsBranches ? [.fillBottom, .heightRainbow, .branchChase] : [.fillBottom, .heightRainbow, .angleSpin]
+    }
+
+    private func shortTitle(_ name: EffectName) -> String {
+        switch name {
+        case .fillBottom: return "Fill"
+        case .heightRainbow: return "Rainbow"
+        case .angleSpin: return "Spin"
+        case .branchChase: return "Chase"
+        }
+    }
+
     private var effects: some View {
         HStack(spacing: 8) {
-            effectButton(.fillBottom, "Fill")
-            effectButton(.heightRainbow, "Rainbow")
-            effectButton(.angleSpin, "Spin")
-            Menu {
-                Button("Whole fixture") { target = "Whole fixture" }
-                Button("Around 1.4 m") { target = "Around 1.4 m" }
-                ForEach(branchLabels, id: \.self) { label in
-                    Button(label) { target = label }
-                }
-            } label: {
-                Image(systemName: "scope")
-                    .frame(width: 52, height: 52)
-                    .foregroundStyle(Theme.ink)
-                    .background(Theme.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            ForEach(effectNames, id: \.self) { name in
+                effectButton(name, shortTitle(name))
             }
-            .accessibilityIdentifier("effect.target")
             Button {
                 Haptics.undo()
                 playing = nil
@@ -161,14 +215,29 @@ struct FixtureScreen: View {
         }
     }
 
+    private func start(_ name: EffectName) {
+        Haptics.place()
+        playing = name
+        started = Date()
+        phase = 0
+        Task { try? await model.client.effect(fixture: fixtureId, name: name.rawValue, address: address) }
+    }
+
+    private func schedulePush() {
+        guard playing != nil else { return }
+        pushAddress?.cancel()
+        let address = self.address
+        let name = playing
+        pushAddress = Task {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+            guard !Task.isCancelled, let name else { return }
+            try? await model.client.effect(fixture: fixtureId, name: name.rawValue, address: address)
+        }
+    }
+
     private func effectButton(_ name: EffectName, _ title: String) -> some View {
         Button {
-            Haptics.place()
-            playing = name
-            started = Date()
-            phase = 0
-            let chosen = effectTarget
-            Task { try? await model.client.effect(fixture: fixtureId, name: name.rawValue, branch: chosen.branch, height: chosen.height, band: chosen.band) }
+            start(name)
         } label: {
             Text(title)
                 .font(.body.weight(.semibold))
@@ -179,21 +248,6 @@ struct FixtureScreen: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("effect.\(name.rawValue)")
-    }
-
-    private var branchLabels: [String] {
-        var labels: [String] = []
-        for waypoint in fixture?.waypoints ?? [] {
-            guard let label = waypoint.label, !label.isEmpty, !labels.contains(label) else { continue }
-            labels.append(label)
-        }
-        return labels
-    }
-
-    private var effectTarget: (branch: String?, height: Double?, band: Double?) {
-        if target == "Around 1.4 m" { return (nil, 1.4, 0.15) }
-        if target == "Whole fixture" { return (nil, nil, nil) }
-        return (target, nil, nil)
     }
 
     private var shownPixels: [MappedPixel] {
@@ -207,8 +261,7 @@ struct FixtureScreen: View {
     private var colors: [RGB] {
         let name = playing ?? .heightRainbow
         let shown = playing == nil ? 0.22 : phase
-        let chosen = effectTarget
-        return targetedColors(shownPixels, name, phase: shown, fixture: fixture, branch: chosen.branch, height: chosen.height, band: chosen.band ?? 0.15)
+        return (try? effectColors(shownPixels, name, phase: shown, address: address)) ?? []
     }
 
     private func load() async {
@@ -306,6 +359,35 @@ struct FixtureScreen: View {
                 Text("A ledmap is only for a fixture on one controller. Upload reboots that board. Scaling the pitch, or setting a span's pixel count while capturing, fixes a count that does not match the board.")
                     .font(.callout)
                     .foregroundStyle(Theme.muted)
+                if showsBranches {
+                    Text("Where it plays")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                    Toggle("At a height", isOn: $limitHeight)
+                        .foregroundStyle(Theme.ink)
+                    if limitHeight {
+                        Slider(value: $heightM, in: 0...max(heightM, 3))
+                            .tint(Theme.amber)
+                        Text(String(format: "%.2f m", heightM))
+                            .foregroundStyle(Theme.muted)
+                    }
+                    Toggle("Along the branch", isOn: $limitAlong)
+                        .foregroundStyle(Theme.ink)
+                    if limitAlong {
+                        Slider(value: $along, in: 0...1)
+                            .tint(Theme.amber)
+                        Text(along < 0.05 ? "At the trunk" : String(format: "%.0f%% along", along * 100))
+                            .foregroundStyle(Theme.muted)
+                    }
+                    if !effectNames.contains(.angleSpin) {
+                        Button("Angle spin") {
+                            more = false
+                            start(.angleSpin)
+                        }
+                        .font(.body.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                    }
+                }
                 if let message = model.message {
                     Text(message).foregroundStyle(Theme.warn)
                 }
@@ -313,7 +395,7 @@ struct FixtureScreen: View {
             }
             .padding(24)
         }
-        .presentationDetents([.large])
+        .presentationDetents([.medium, .large])
     }
 }
 

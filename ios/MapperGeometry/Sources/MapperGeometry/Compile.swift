@@ -15,7 +15,61 @@ public func compile(_ fixture: Fixture) throws -> [MappedPixel] {
     for run in fixture.runs {
         pixels.append(contentsOf: try compileRun(fixture.name, run, index))
     }
-    return pixels
+    return annotateGroups(fixture, pixels)
+}
+
+private func annotateGroups(_ fixture: Fixture, _ pixels: [MappedPixel]) -> [MappedPixel] {
+    guard !pixels.isEmpty else { return pixels }
+    let groups = Dictionary(uniqueKeysWithValues: (fixture.groups ?? []).map { ($0.id, $0) })
+    var segmentGroup: [String: String] = [:]
+    for run in fixture.runs {
+        let runGroup = run.groupId ?? ""
+        for segment in run.segments {
+            let own = segment.groupId ?? ""
+            segmentGroup[segment.id] = own.isEmpty ? runGroup : own
+        }
+    }
+    var buckets: [String: [Int]] = [:]
+    for (index, pixel) in pixels.enumerated() {
+        let groupId = segmentGroup[pixel.segment] ?? ""
+        let key = groupId.isEmpty ? "segment:\(pixel.segment)" : groupId
+        buckets[key, default: []].append(index)
+    }
+    var trunkPoints: [Vec3] = []
+    for indices in buckets.values {
+        let groupId = segmentGroup[pixels[indices[0]].segment] ?? ""
+        if groups[groupId]?.role == .trunk {
+            trunkPoints.append(contentsOf: indices.map { pixels[$0].position })
+        }
+    }
+    var annotated = pixels
+    for indices in buckets.values {
+        let groupId = segmentGroup[pixels[indices[0]].segment] ?? ""
+        let group = groups[groupId]
+        let role = group?.role.rawValue ?? ""
+        let points = indices.map { pixels[$0].position }
+        let parameters = outwardParameters(points, role: role, trunkPoints: trunkPoints)
+        for (offset, index) in indices.enumerated() {
+            let pixel = pixels[index]
+            annotated[index] = MappedPixel(
+                fixture: pixel.fixture,
+                controller: pixel.controller,
+                output: pixel.output,
+                index: pixel.index,
+                x: pixel.x,
+                y: pixel.y,
+                z: pixel.z,
+                segment: pixel.segment,
+                u: pixel.u,
+                group: groupId,
+                groupName: group?.name ?? "",
+                groupRole: role,
+                branchU: parameters[offset].0,
+                branchHeight: parameters[offset].1
+            )
+        }
+    }
+    return annotated
 }
 
 public func validateCounts(_ fixture: Fixture, pixels: [MappedPixel]? = nil) throws -> [RunReport] {
@@ -47,6 +101,12 @@ public func normalise(_ fixture: Fixture) -> Fixture {
     let moved = normalisePoints(copy.waypoints.map(\.position))
     for index in copy.waypoints.indices {
         copy.waypoints[index].position = moved.points[index]
+    }
+    if var references = copy.references {
+        for index in references.indices {
+            references[index].position = applyFrame(references[index].position, moved.frame)
+        }
+        copy.references = references
     }
     copy.frame = moved.frame
     return copy

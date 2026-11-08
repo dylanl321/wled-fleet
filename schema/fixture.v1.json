@@ -2,12 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/dylanl321/wled-fleet/schema/fixture.v1.json",
   "title": "WLED Mapper Fixture",
-  "description": "One fixture document. Version 1. The iOS app and the fleet server both validate against this file.",
+  "description": "One fixture document. The iOS app and the fleet server both validate against this file. schemaVersion 1 is the original fixture. schemaVersion 2 is that same document plus optional groups, reference marks, and session alignments. A version 1 document stays valid, and the new fields may also appear on a version 1 document.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schemaVersion", "id", "name", "origin", "surfaceHint", "waypoints", "runs"],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": {
+      "description": "1 is the original fixture. 2 adds optional groups, reference marks, and session alignments. Readers accept both.",
+      "enum": [1, 2]
+    },
     "id": { "type": "string", "minLength": 1, "maxLength": 80 },
     "name": { "type": "string", "minLength": 1, "maxLength": 80 },
     "origin": { "$ref": "#/$defs/origin" },
@@ -21,6 +24,21 @@
       "items": { "$ref": "#/$defs/run" }
     },
     "frame": { "$ref": "#/$defs/frame" },
+    "groups": {
+      "type": "array",
+      "description": "Named parts of a branching fixture, such as the trunk and each limb.",
+      "items": { "$ref": "#/$defs/group" }
+    },
+    "references": {
+      "type": "array",
+      "description": "Labelled marks in the fixture frame. A later session re-taps two of them, or three when the yaw needs to be more robust.",
+      "items": { "$ref": "#/$defs/referencePoint" }
+    },
+    "alignments": {
+      "type": "array",
+      "description": "Rigid transforms that brought a later capture into this fixture frame.",
+      "items": { "$ref": "#/$defs/alignment" }
+    },
     "createdAt": { "type": "string", "minLength": 1, "maxLength": 40 },
     "updatedAt": { "type": "string", "minLength": 1, "maxLength": 40 }
   },
@@ -85,6 +103,7 @@
         "pixelCount": { "type": "integer", "minimum": 0 },
         "pitchMm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
         "colorOrder": { "enum": ["GRB", "RGB", "BRG", "RBG", "BGR", "GBR", "GRBW", "RGBW", "BRGW", "RBGW", "BGRW", "GBRW"] },
+        "groupId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
         "pixelCorrections": {
           "type": "array",
           "description": "Per-pixel positions from camera detection or hand edits. They replace the compiled point for that index and leave the path shape in place.",
@@ -109,7 +128,54 @@
           "items": { "type": "string", "minLength": 1, "maxLength": 80 }
         },
         "params": { "type": "object" },
-        "pixelCountOverride": { "type": ["integer", "null"], "minimum": 0 }
+        "pixelCountOverride": { "type": ["integer", "null"], "minimum": 0 },
+        "groupId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "role": { "enum": ["trunk", "branch"] }
+      }
+    },
+    "referencePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "position"],
+      "description": "A labelled mark stored in the fixture frame, metres, y up.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "waypointId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "alignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "method", "rotation", "translation", "yawRadians", "residualM"],
+      "description": "Version 1 rigid transform from a capture session into the fixture frame. Two marks use a gravity-aligned yaw and a translation. Three or more use Kabsch. worldMap means ARKit relocalised and the stored frame was enough.",
+      "properties": {
+        "version": { "const": 1 },
+        "method": { "enum": ["worldMap", "yawTranslation", "kabsch"] },
+        "rotation": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "description": "Row-major 3x3 rotation. Applied before translation: p' = R p + t.",
+          "items": { "type": "number" }
+        },
+        "translation": { "$ref": "#/$defs/vec3" },
+        "yawRadians": { "type": "number" },
+        "residualM": { "type": "number", "minimum": 0 },
+        "referenceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        }
       }
     },
     "pixelCorrection": {

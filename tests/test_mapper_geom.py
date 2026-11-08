@@ -8,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
+from app.mapper.align import align_points, derive_references, distribute_drift, frame_as_rigid, yaw_matrix
 from app.mapper.compile import compile_fixture, validate_counts
 from app.mapper.ddp import DDP_MAX_PIXELS, build_packets
 from app.mapper.effects import effect_colors
 from app.mapper.export import XLIGHTS_SOURCE_VERSION, pixelblaze_map, pixels_csv, xlights_polyline, xlights_xmodel
 from app.mapper.geom import (
+    Frame,
     Vec3,
+    apply_frame,
     catmull_rom,
     curve_length,
     curve_position,
@@ -385,3 +388,139 @@ def test_fill_lights_from_the_bottom():
     spin = effect_colors(pixels, "angle-spin", 0.25)
     assert rainbow[0] != rainbow[len(pixels) // 2]
     assert spin[0] != (0, 0, 0)
+
+
+def _rotate(point: Vec3, yaw: float) -> Vec3:
+    rotation = yaw_matrix(yaw)
+    return Vec3(
+        rotation[0] * point.x + rotation[2] * point.z,
+        point.y,
+        rotation[6] * point.x + rotation[8] * point.z,
+    )
+
+
+def _rodrigues(point: Vec3, axis: Vec3, angle: float) -> Vec3:
+    unit = axis.normalized()
+    return (
+        point * math.cos(angle)
+        + unit.cross(point) * math.sin(angle)
+        + unit * (unit.dot(point) * (1.0 - math.cos(angle)))
+    )
+
+
+def test_drift_is_spread_by_path_distance_and_leaves_the_reference():
+    points = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 0, 0)]
+    original = list(points)
+    result = distribute_drift(points, Vec3(0, 0.4, 0))
+    assert original == points
+    assert result.error_m == pytest.approx(0.4)
+    assert result.weights[0] == pytest.approx(0)
+    assert result.weights[1] == pytest.approx(1 / 2.4)
+    assert result.weights[2] == pytest.approx(2 / 2.4)
+    assert result.corrected[0] == points[0]
+    assert result.corrected[2].y == pytest.approx(-0.4 * 2 / 2.4)
+    held = distribute_drift([Vec3(5, 5, 5), Vec3(0, 0, 0), Vec3(1, 0, 0)], Vec3(0, 0.3, 0), reference_index=1)
+    assert held.corrected[0] == Vec3(5, 5, 5)
+    assert held.weights[0] == 0
+
+
+def test_two_marks_yaw_and_three_marks_kabsch():
+    yaw = 0.4
+    shift = Vec3(2, -1, 3)
+    source = [Vec3(0, 0, 0), Vec3(1, 0.2, 0)]
+    target = [_rotate(point, yaw) + shift for point in source]
+    rigid = align_points(source, target, ["base", "tip"])
+    assert rigid.method == "yawTranslation"
+    assert rigid.yaw_radians == pytest.approx(yaw)
+    assert rigid.residual_m == pytest.approx(0, abs=1e-9)
+    assert rigid.rotation[4] == pytest.approx(1)
+    for point, goal in zip(source, target):
+        assert distance(rigid.apply(point), goal) == pytest.approx(0, abs=1e-9)
+
+    pitched = [_rodrigues(point, Vec3(1, 0, 0), math.radians(20)) for point in source]
+    flat = align_points(source, pitched)
+    assert flat.method == "yawTranslation"
+    assert flat.residual_m > 1e-3
+    assert flat.rotation[4] == pytest.approx(1)
+
+    square = [Vec3(0, 0, 0), Vec3(1, 0, 0), Vec3(0, 0.2, 1), Vec3(1, 0.4, 1)]
+    tilted = [_rodrigues(point, Vec3(1, 2, 3), 0.6) + Vec3(1, -2, 0.5) for point in square]
+    full = align_points(square, tilted)
+    assert full.method == "kabsch"
+    assert full.residual_m == pytest.approx(0, abs=1e-6)
+
+    frame = Frame(Vec3(-1, 2, 0.5), 0.7)
+    point = Vec3(0.2, -3, 1.4)
+    same = frame_as_rigid(frame)
+    assert distance(same.apply(point), apply_frame(point, frame)) == pytest.approx(0, abs=1e-12)
+
+
+def test_branch_coordinates_and_chase_run_out_from_the_trunk():
+    fixture = load("branching-tree.json")
+    require_valid(fixture)
+    pixels = compile_fixture(fixture)
+    branch_one = [pixel for pixel in pixels if pixel.group == "branch-1"]
+    branch_two = [pixel for pixel in pixels if pixel.group == "branch-2"]
+    trunk = [pixel for pixel in pixels if pixel.group_role == "trunk"]
+    assert branch_one[0].branch_u == pytest.approx(0)
+    assert branch_one[-1].branch_u == pytest.approx(1)
+    assert branch_two[0].branch_u == pytest.approx(1)
+    assert branch_two[-1].branch_u == pytest.approx(0)
+    assert trunk[0].branch_u < trunk[-1].branch_u
+    assert branch_one[0].group_name == "Branch 1"
+
+    leaving = effect_colors(pixels, "branch-chase", 0, {"target": "branches"})
+    arriving = effect_colors(pixels, "branch-chase", 1, {"target": "branches"})
+    for pixel, start, end in zip(pixels, leaving, arriving):
+        if pixel.group_role != "branch":
+            assert start == (0, 0, 0)
+            assert end == (0, 0, 0)
+        elif pixel.branch_u == pytest.approx(0):
+            assert start == (255, 244, 230)
+            assert end == (0, 0, 0)
+        elif pixel.branch_u == pytest.approx(1):
+            assert start == (0, 0, 0)
+            assert end == (255, 244, 230)
+
+    ring = effect_colors(pixels, "height-rainbow", 0, {"target": "all branches", "heightM": 1.4, "bandM": 0.05})
+    lit = [pixel for pixel, color in zip(pixels, ring) if color != (0, 0, 0)]
+    assert lit
+    assert all(pixel.group_role == "branch" and abs(pixel.y - 1.4) <= 0.05 + 1e-9 for pixel in lit)
+    with pytest.raises(ValueError):
+        effect_colors(pixels, "branch-chase", 0, {"target": "nope"})
+
+
+def test_schema_accepts_version_two_alignment_and_still_rejects_junk():
+    straight = load("straight-1m.json")
+    assert straight["schemaVersion"] == 1
+    require_valid(straight)
+    marks = derive_references(straight["waypoints"])
+    assert [mark["label"] for mark in marks] == ["Start", "End"]
+    version_two = {
+        "schemaVersion": 2,
+        "id": "align-1",
+        "name": "Aligned",
+        "origin": straight["origin"],
+        "surfaceHint": "freeform",
+        "waypoints": straight["waypoints"],
+        "runs": straight["runs"],
+        "references": marks,
+        "alignments": [
+            {
+                "version": 1,
+                "method": "yawTranslation",
+                "rotation": [1, 0, 0, 0, 1, 0, 0, 0, 1],
+                "translation": [0, 0, 0],
+                "yawRadians": 0,
+                "residualM": 0.012,
+                "referenceIds": [marks[0]["id"], marks[1]["id"]],
+            }
+        ],
+    }
+    require_valid(version_two)
+    broken = dict(version_two)
+    broken["alignments"] = [dict(version_two["alignments"][0], version=2)]
+    assert any("version" in error for error in validate(broken))
+    broken_role = dict(load("branching-tree.json"))
+    broken_role["groups"] = [{"id": "trunk", "name": "Trunk", "role": "canopy"}]
+    assert any("role" in error for error in validate(broken_role))

@@ -54,12 +54,15 @@ TestFlight needs a paid Apple Developer account. In Xcode choose **Product → A
 
 1. Tap **Map a fixture**, name it, and pick Wall, Column, Tree, or Freeform.
 2. Choose the controller output and the pitch (60 per metre is the default). The list comes from the fleet server, including each output's pixel count and color order.
-3. Aim the reticle and tap. Straight and Jump close after two points. Polyline, Helix, and Curve keep the points until you change shape. Helix asks for turns, radius, and which way it winds. **Nudge** slides the last point along the camera ray when a thin branch is hard to hit.
-4. The count reads `placed · on controller`. Green means they agree within 3 percent. **Next** starts another output on the same fixture, which is how a tree spans two Dig-Unos.
+3. Aim the reticle and tap. Straight and Jump close after two points. Polyline, Helix, and Curve keep the points until you change shape. A helix is one tap per turn, on the same side of the trunk; the radius and the wind direction sit on that panel. **Nudge** slides the last point along the camera ray when a thin branch is hard to hit. On a tree, **Trunk** and **New branch** name the limb you are on.
+4. The count reads `placed · on controller`. Green means they agree within 3 percent. **Next** starts another output on the same fixture, including a second port on the same board.
 5. While you tap, the server lights the pixel at the end of the wire over DDP so you can see you are on the right spot.
-6. **Save** stores the fixture on the server and keeps an ARWorldMap on the phone so a later visit can line up with the same room. The map file stays on the phone. The server stores the JSON.
+6. **Close loop** asks you to tap the start again. The phone shows how far that re-tap missed, and **Before** / **After** show the path before you commit. **Straighten** shares the miss along the walk. **Undo** puts the taps back.
+7. **Save** stores the fixture on the server and keeps an ARWorldMap on the phone so a later visit can line up with the same room. The map file stays on the phone. The server stores the JSON, including the labelled marks.
 
-From the fixture screen you can orbit the pixels, run Fill, Rainbow, or Spin (the server streams them, and the preview plays the same effect), send a ledmap, or share CSV, JSON, Pixelblaze, or xLights. Sending a ledmap asks first. It reboots that one controller.
+Open the same fixture later and the phone tries the saved scan first. If it finds the room, it says **Same place** and you can keep tapping. If it does not, it asks you to tap two of the saved marks (a third is there when you want the match to be stricter). It shows the miss in centimetres before you accept it.
+
+From the fixture screen you can orbit the pixels, run Fill, Rainbow, or Spin. A tree also has **Chase**, which runs out from the trunk along every branch at once. The **All** menu limits an effect to the trunk, every branch, or one branch. The slider button hides **At a height** and **Along the branch**. The server streams the effect, and the preview plays the same one. You can send a ledmap, or share CSV, JSON, Pixelblaze, or xLights. Sending a ledmap asks first. It reboots that one controller.
 
 ## Geometry package
 

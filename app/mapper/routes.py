@@ -146,26 +146,6 @@ def mount_mapper(app) -> None:
             raise HTTPException(status_code=400, detail="seen must be a list of indexes")
         return mapper_of(request).accept_detection(fixture_id, corrections, seen)
 
-    @router.post("/fixtures/{fixture_id}/align")
-    async def align(fixture_id: str, request: Request) -> dict:
-        body = await _body(request)
-        try:
-            return mapper_of(request).align_session(
-                fixture_id, _point(body, "sourceA"), _point(body, "sourceB"), _point(body, "destA"), _point(body, "destB")
-            )
-        except FleetError:
-            raise
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="Each reference needs [x, y, z].") from exc
-
-    @router.post("/fixtures/{fixture_id}/drift")
-    async def drift(fixture_id: str, request: Request) -> dict:
-        body = await _body(request)
-        try:
-            return mapper_of(request).spread_drift(fixture_id, _point(body, "error"))
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail="error must be [x, y, z].") from exc
-
     @router.get("/fixtures/{fixture_id}/export")
     async def export(fixture_id: str, request: Request) -> Response:
         fmt = request.query_params.get("format") or "json"

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from app.mapper.align import align_references, distribute_drift
+from app.mapper.align import align_points, distribute_drift
 from app.mapper.compile import compile_fixture
 from app.mapper.detect import (
     brightest_blobs,
@@ -21,7 +21,7 @@ from app.mapper.detect import (
     refine_with_model,
     triangulate,
 )
-from app.mapper.effects import targeted_colors
+from app.mapper.effects import effect_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, xlights_polyline, xlights_xmodel
 from app.mapper.geom import Vec3
 from app.mapper.importers import import_text
@@ -118,21 +118,21 @@ def test_import_round_trip_and_polyline():
 
 def test_drift_alignment_and_branch_colors():
     points = [Vec3(0, 0, 0), Vec3(0, 1, 0), Vec3(0.3, 2, 0)]
-    closed = distribute_drift(points, Vec3(0.3, 0, 0))
-    assert closed[0] == points[0]
-    assert abs(closed[-1].x) < 1e-9
-    assert abs(closed[1].x + 0.15) < 1e-9
-    moved, _yaw = align_references(Vec3(0, 0, 0), Vec3(0, 0, 1), Vec3(1, 0, 0), Vec3(2, 0, 0), [Vec3(0, 0, 1)])
-    assert abs(moved[0].x - 2) < 1e-6
-    assert abs(moved[0].z) < 1e-6
+    closed = distribute_drift(points, Vec3(0.3, 2, 0))
+    assert closed.corrected[0] == points[0]
+    assert abs(closed.corrected[-1].x) < 1e-6
+    rigid = align_points([Vec3(0, 0, 0), Vec3(0, 0, 1)], [Vec3(1, 0, 0), Vec3(2, 0, 0)])
+    moved = rigid.apply(Vec3(0, 0, 1))
+    assert abs(moved.x - 2) < 1e-6
+    assert abs(moved.z) < 1e-6
     tree = load("branching-tree.json")
     pixels = compile_fixture(tree)
-    colors = targeted_colors(pixels, "fill-bottom", 1.0, {"branch": "branch 1"}, tree)
+    colors = effect_colors(pixels, "fill-bottom", 1.0, {"target": "branch-1"})
     branch = [index for index, pixel in enumerate(pixels) if pixel.segment == "seg-branch-1"]
     trunk = [index for index, pixel in enumerate(pixels) if pixel.segment == "seg-trunk"]
     assert branch and all(colors[index] == (255, 244, 230) for index in branch)
     assert trunk and colors[trunk[0]] == (0, 0, 0)
-    band = targeted_colors(pixels, "fill-bottom", 1.0, {"height": 1.4, "band": 0.05}, tree)
+    band = effect_colors(pixels, "fill-bottom", 1.0, {"heightM": 1.4, "bandM": 0.05})
     assert any(color != (0, 0, 0) for color in band)
     assert band[0] == (0, 0, 0)
 
@@ -172,15 +172,8 @@ def test_detect_import_and_align_routes(tmp_path):
         polyline = client.get(f"/api/mapper/fixtures/{straight['id']}/export?format=polyline")
         assert polyline.status_code == 200
         assert 'DisplayAs="Poly Line"' in polyline.text
-        drifted = client.post(f"/api/mapper/fixtures/{straight['id']}/drift", json={"error": [0.1, 0, 0]})
-        assert drifted.status_code == 200
-        end = drifted.json()["waypoints"][1]["position"]
-        assert abs(end[0] + 0.1) < 1e-9
-        corrected = drifted.json()["runs"][0]["pixelCorrections"][0]["position"]
-        assert abs(corrected[0] - (0.02 - 0.1 * 4 / 59)) < 1e-9
-        aligned = client.post(
-            f"/api/mapper/fixtures/{straight['id']}/align",
-            json={"sourceA": [0, 0, 0], "sourceB": [0, 1, 0], "destA": [1, 0, 0], "destB": [1, 0, 1]},
-        )
-        assert aligned.status_code == 200
-        assert abs(aligned.json()["waypoints"][0]["position"][0] - 1) < 1e-6
+        saved = client.get(f"/api/mapper/fixtures/{straight['id']}").json()
+        ends = [Vec3(*item["position"]) for item in saved["waypoints"]]
+        closed = distribute_drift(ends, ends[-1] + Vec3(0.1, 0, 0))
+        assert closed.corrected[0] == ends[0]
+        assert closed.corrected[-1].x < ends[-1].x

@@ -11,57 +11,51 @@ public struct RGB: Equatable {
     }
 }
 
-public func targetedColors(
-    _ pixels: [MappedPixel],
-    _ name: EffectName,
-    phase: Double,
-    fixture: Fixture? = nil,
-    branch: String? = nil,
-    segment: String? = nil,
-    height: Double? = nil,
-    band: Double = 0.15
-) -> [RGB] {
-    let chosen = pixels.indices.filter { selected(pixels[$0], fixture: fixture, branch: branch, segment: segment, height: height, band: band) }
-    var output = Array(repeating: RGB(0, 0, 0), count: pixels.count)
-    guard !chosen.isEmpty else { return output }
-    let colors = effectColors(chosen.map { pixels[$0] }, name, phase: phase)
-    for (slot, index) in chosen.enumerated() {
-        output[index] = colors[slot]
+public struct EffectAddress: Equatable {
+    public var target: String
+    public var heightM: Double?
+    public var branchHeightM: Double?
+    public var branchU: Double?
+    public var bandM: Double?
+    public var bandU: Double?
+
+    public init(
+        target: String = "all",
+        heightM: Double? = nil,
+        branchHeightM: Double? = nil,
+        branchU: Double? = nil,
+        bandM: Double? = nil,
+        bandU: Double? = nil
+    ) {
+        self.target = target
+        self.heightM = heightM
+        self.branchHeightM = branchHeightM
+        self.branchU = branchU
+        self.bandM = bandM
+        self.bandU = bandU
     }
-    return output
 }
 
-private func selected(_ pixel: MappedPixel, fixture: Fixture?, branch: String?, segment: String?, height: Double?, band: Double) -> Bool {
-    if let segment, !segment.isEmpty, pixel.segment != segment { return false }
-    if let branch, !branch.isEmpty, !branchMatch(pixel.segment, branch, fixture) { return false }
-    if let height, abs(pixel.y - height) > band { return false }
-    return true
+public struct EffectError: Error, CustomStringConvertible {
+    public var description: String
+    public init(_ description: String) { self.description = description }
 }
 
-private func branchMatch(_ segmentId: String, _ branch: String, _ fixture: Fixture?) -> Bool {
-    let needle = branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    if needle.isEmpty || needle == segmentId.lowercased() { return true }
-    guard let fixture else { return segmentId.lowercased().contains(needle) }
-    let labels = Dictionary(uniqueKeysWithValues: fixture.waypoints.map { ($0.id, $0.label ?? "") })
-    for run in fixture.runs {
-        for segment in run.segments where segment.id == segmentId {
-            let names = segment.waypointIds.map { labels[$0] ?? "" }
-            let blob = ([segment.id] + names).joined(separator: " ").lowercased()
-            return blob.contains(needle)
-        }
-    }
-    return segmentId.lowercased().contains(needle)
-}
+private let cometWidth = 0.18
 
-public func effectColors(_ pixels: [MappedPixel], _ name: EffectName, phase: Double) -> [RGB] {
+public func effectColors(_ pixels: [MappedPixel], _ name: EffectName, phase: Double, address: EffectAddress = EffectAddress()) throws -> [RGB] {
+    try requireTarget(pixels, address.target)
     guard !pixels.isEmpty else { return [] }
     var cycle = phase.truncatingRemainder(dividingBy: 1)
     if cycle < 0 { cycle += 1 }
     if phase > 0 && abs(cycle) < 1e-12 { cycle = 1 }
-    let low = pixels.map(\.y).min()!
-    let high = pixels.map(\.y).max()!
+    let keep = try pixels.map { try addressed($0, address) }
+    let chosen = zip(pixels, keep).compactMap { pixel, on -> MappedPixel? in on ? pixel : nil }
+    let low = chosen.map(\.y).min() ?? 0
+    let high = chosen.map(\.y).max() ?? 0
     let height = max(high - low, 1e-6)
-    return pixels.map { pixel in
+    return zip(pixels, keep).map { pixel, on in
+        guard on else { return RGB(0, 0, 0) }
         switch name {
         case .fillBottom:
             let threshold = low + cycle * height
@@ -73,7 +67,59 @@ public func effectColors(_ pixels: [MappedPixel], _ name: EffectName, phase: Dou
             var hue = (atan2(pixel.x, pixel.z) / (2 * Double.pi) + 0.5 + cycle).truncatingRemainder(dividingBy: 1)
             if hue < 0 { hue += 1 }
             return hsv(hue)
+        case .branchChase:
+            return comet(pixel.branchU, cycle)
         }
+    }
+}
+
+private func comet(_ branchU: Double, _ phase: Double) -> RGB {
+    let delta = phase - branchU
+    if delta < -1e-9 || delta > cometWidth { return RGB(0, 0, 0) }
+    let gain = 1 - max(delta, 0) / cometWidth
+    return RGB(Int((255 * gain).rounded()), Int((244 * gain).rounded()), Int((230 * gain).rounded()))
+}
+
+private func requireTarget(_ pixels: [MappedPixel], _ target: String) throws {
+    let key = targetKey(target)
+    if key == "all" { return }
+    if pixels.contains(where: { matches($0, key) }) { return }
+    throw EffectError("Nothing on this fixture matches that.")
+}
+
+private func addressed(_ pixel: MappedPixel, _ address: EffectAddress) throws -> Bool {
+    if !matches(pixel, targetKey(address.target)) { return false }
+    if try !near(pixel.y, address.heightM, address.bandM, 0.05) { return false }
+    if try !near(pixel.branchHeight, address.branchHeightM, address.bandM, 0.05) { return false }
+    if try !near(pixel.branchU, address.branchU, address.bandU, 0.05) { return false }
+    return true
+}
+
+private func near(_ value: Double, _ center: Double?, _ band: Double?, _ defaultBand: Double) throws -> Bool {
+    guard let center else { return true }
+    let width = band ?? defaultBand
+    if width < 0 { throw EffectError("The band has to be zero or more.") }
+    return abs(value - center) <= width + 1e-9
+}
+
+private func targetKey(_ value: String) -> String {
+    let key = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if key.isEmpty || key == "all" { return "all" }
+    if key == "branches" || key == "all branches" { return "branches" }
+    if key == "trunk" || key == "the trunk" { return "trunk" }
+    return key
+}
+
+private func matches(_ pixel: MappedPixel, _ target: String) -> Bool {
+    switch target {
+    case "all":
+        return true
+    case "branches":
+        return pixel.groupRole == "branch"
+    case "trunk":
+        return pixel.groupRole == "trunk"
+    default:
+        return target == pixel.group.lowercased() || (!pixel.groupName.isEmpty && target == pixel.groupName.lowercased())
     }
 }
 

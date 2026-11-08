@@ -14,28 +14,43 @@ struct CaptureScreen: View {
 
     var body: some View {
         ZStack {
-            CaptureCanvas(session: capture.session, waypoints: capture.fixture.waypoints, fixtureId: fixtureId)
+            CaptureCanvas(session: capture.session, waypoints: capture.shownWaypoints, fixtureId: fixtureId)
                 .ignoresSafeArea()
                 .onTapGesture { place() }
             reticle
             VStack(spacing: 12) {
                 topBar
-                Spacer().allowsHitTesting(false)
-                shapes
-                if capture.shape == .helix { helixBar }
-                if showNudge { nudgeBar }
-                if let notice = capture.notice {
-                    Text(notice)
-                        .font(.footnote.weight(.medium))
-                        .foregroundStyle(Theme.warn)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if let banner = capture.banner {
+                    Text(banner)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(.black.opacity(0.55), in: Capsule())
                 }
-                adjustGroup
-                countLine
-                HStack(spacing: 10) {
-                    BigButton(title: "Undo", prominent: false) { capture.undo() }
-                        .disabled(capture.fixture.waypoints.isEmpty)
-                    BigButton(title: capture.saving ? "Saving" : "Save") { Task { await save() } }
+                Spacer().allowsHitTesting(false)
+                if capture.driftOffer != nil {
+                    driftCard
+                } else if capture.gate == .open {
+                    if capture.fixture.surfaceHint == .branching { groupRow }
+                    shapes
+                    if capture.shape == .helix { helixBar }
+                    if showNudge { nudgeBar }
+                    if let notice = capture.notice {
+                        Text(notice)
+                            .font(.footnote.weight(.medium))
+                            .foregroundStyle(Theme.warn)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    adjustGroup
+                    countLine
+                    HStack(spacing: 10) {
+                        BigButton(title: "Undo", prominent: false) { capture.undo() }
+                            .disabled(capture.fixture.waypoints.isEmpty)
+                        BigButton(title: capture.saving ? "Saving" : "Save") { Task { await save() } }
+                    }
+                } else {
+                    alignmentCard
                 }
             }
             .padding(16)
@@ -72,6 +87,19 @@ struct CaptureScreen: View {
             }
             .buttonStyle(.plain)
             Spacer()
+            if capture.canCloseLoop {
+                Button(capture.driftArmed ? "Cancel" : "Close loop") {
+                    capture.driftArmed.toggle()
+                    capture.banner = capture.driftArmed ? "Tap the start again" : nil
+                    Haptics.undo()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(capture.driftArmed ? Color.black : Theme.ink)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(capture.driftArmed ? Theme.amber : Color.black.opacity(0.45), in: Capsule())
+                .accessibilityIdentifier("capture.close")
+            }
             Text(ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) ? "LiDAR" : "Planes")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(Theme.ink)
@@ -160,15 +188,6 @@ struct CaptureScreen: View {
                 Button("Use the measured count") { capture.clearSpanOverride() }
                     .font(.caption.weight(.medium))
                     .foregroundStyle(Theme.muted)
-                Button("Mark this point as a reference") { capture.markReference() }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.ink)
-                Button("Spread drift from the last tap") { capture.spreadDrift() }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(Theme.ink)
-                Text("Tap a reference at the start, tap it again at the end, then spread the drift. A later session asks for both references before new points are added. A saved map is reloaded when you come back.")
-                    .font(.caption)
-                    .foregroundStyle(Theme.muted)
             }
             .padding(.top, 8)
         }
@@ -176,6 +195,96 @@ struct CaptureScreen: View {
         .foregroundStyle(Theme.ink)
         .padding(12)
         .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var groupRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(capture.fixture.groups ?? []) { group in
+                    Button {
+                        capture.selectGroup(group.id)
+                    } label: {
+                        Text(group.name)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(capture.activeGroupId == group.id ? Color.black : Theme.ink)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 10)
+                            .background(capture.activeGroupId == group.id ? Theme.amber : Color.black.opacity(0.45), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+                Button {
+                    capture.addBranch()
+                } label: {
+                    Text("New branch")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Theme.ink)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color.black.opacity(0.45), in: Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var driftCard: some View {
+        let centimetres = (capture.driftOffer?.errorM ?? 0) * 100
+        let linedUp = centimetres < 0.5
+        let headline = linedUp
+            ? "The start still lines up"
+            : (centimetres < 10 ? String(format: "%.1f cm from the start", centimetres) : String(format: "%.0f cm from the start", centimetres))
+        return VStack(alignment: .leading, spacing: 12) {
+            Text(headline)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+            Text(capture.showDriftAfter ? "Spread along the path" : "As tapped")
+                .font(.subheadline)
+                .foregroundStyle(Theme.muted)
+            Picker("Path", selection: $capture.showDriftAfter) {
+                Text("Before").tag(false)
+                Text("After").tag(true)
+            }
+            .pickerStyle(.segmented)
+            .accessibilityIdentifier("capture.drift")
+            BigButton(title: "Straighten", prominent: !linedUp) { capture.applyDrift() }
+            BigButton(title: "Leave it", prominent: linedUp) { capture.leaveDrift() }
+        }
+        .padding(16)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var alignmentCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(capture.prompt)
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(capture.residualWarn && capture.gate == .review ? Theme.warn : Theme.ink)
+            if capture.gate == .seeking {
+                Text("Hold the phone where you started.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+                BigButton(title: "Tap the marks", prominent: true) { capture.beginMarks() }
+            } else if capture.gate == .marks {
+                Text("Same spot as last time.")
+                    .font(.subheadline)
+                    .foregroundStyle(Theme.muted)
+            } else if capture.gate == .review {
+                BigButton(title: "Use this") { capture.acceptAlignment() }
+                HStack(spacing: 16) {
+                    Button("Try again") { capture.retryMarks() }
+                        .foregroundStyle(Theme.ink)
+                    if capture.canAddThird {
+                        Button("Add a third mark") { capture.armThird() }
+                            .foregroundStyle(Theme.amber)
+                    }
+                }
+                .font(.subheadline.weight(.semibold))
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.black.opacity(0.55), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .accessibilityIdentifier("capture.align")
     }
 
     private var countLine: some View {
@@ -251,9 +360,11 @@ struct CaptureScreen: View {
         capture.saving = true
         defer { capture.saving = false }
         var fixture = capture.prepared()
+        let keepAlignment = fixture.frame != nil
         if fixture.frame == nil {
             fixture = normalise(fixture)
         }
+        fixture = capture.stamped(fixture, keepAlignment: keepAlignment)
         capture.session.archiveWorldMap(id: fixture.id)
         do {
             let saved = try await model.client.update(fixture)
@@ -270,6 +381,13 @@ struct CaptureScreen: View {
     }
 }
 
+enum CaptureGate {
+    case open
+    case seeking
+    case marks
+    case review
+}
+
 @MainActor
 final class CaptureModel: ObservableObject {
     @Published var fixture = Fixture(id: "draft", name: "Fixture", surfaceHint: .freeform, waypoints: [], runs: [])
@@ -279,14 +397,28 @@ final class CaptureModel: ObservableObject {
     @Published var nudge = 0.0
     @Published var saving = false
     @Published var notice: String?
-    @Published var aligning = false
+    @Published var gate: CaptureGate = .open
+    @Published var banner: String?
+    @Published var prompt = ""
+    @Published var driftArmed = false
+    @Published var showDriftAfter = false
+    @Published var driftOffer: DriftResult?
+    @Published var activeGroupId: String?
+    @Published var candidate: SessionAlignment?
+    @Published var residualWarn = false
     let session = CaptureSession()
-    private var alignTaps: [Vec3] = []
     private var history: [Fixture] = []
     private var active = 0
     private var lastHit: Vec3?
     private var lastCamera: Vec3?
     private var inward: Vec3?
+    private var sessionIds: [String] = []
+    private var driftReferenceId: String?
+    private var driftBefore: Fixture?
+    private var markTaps: [Vec3] = []
+    private var sessionRigid: SessionAlignment?
+    private var pendingAlignment: SessionAlignment?
+    private var sawRelocalizing = false
 
     var activeRun: Run? {
         fixture.runs.indices.contains(active) ? fixture.runs[active] : nil
@@ -335,6 +467,28 @@ final class CaptureModel: ObservableObject {
         return segment.waypointIds.count
     }
 
+    var canCloseLoop: Bool {
+        gate == .open && driftReferenceId != nil && driftOffer == nil
+    }
+
+    var canAddThird: Bool {
+        gate == .review && markTaps.count == 2 && marks.count >= 3
+    }
+
+    var shownWaypoints: [Waypoint] {
+        if showDriftAfter, let preview = driftPreview {
+            return preview.waypoints
+        }
+        return fixture.waypoints
+    }
+
+    var marks: [ReferencePoint] {
+        if let stored = fixture.references, stored.count >= 2 {
+            return stored
+        }
+        return deriveReferences(fixture.waypoints)
+    }
+
     var countOk: Bool {
         let expected = activeRun?.pixelCount ?? 0
         guard expected > 0 else { return true }
@@ -352,13 +506,106 @@ final class CaptureModel: ObservableObject {
             assign(controller, output: controller.outputs.first)
         }
         active = max(fixture.runs.count - 1, 0)
-        let references = fixture.waypoints.filter { ($0.label ?? "").localizedCaseInsensitiveContains("reference") }
-        if references.count >= 2 && fixture.runs.contains(where: { !$0.segments.isEmpty }) {
-            aligning = true
-            notice = "Re-tap \(references[0].label ?? "the first reference"), then \(references[1].label ?? "the second"), before adding to this map."
-        } else if CaptureSession.hasMap(fixture.id) {
-            notice = "The saved map is loaded. Walk until the old points sit on the lights."
+        if fixture.surfaceHint == .branching {
+            activeGroupId = ensureTrunk()
         }
+        if !fixture.waypoints.isEmpty, marks.count >= 2 {
+            gate = .seeking
+            prompt = "Finding the last scan"
+        }
+        session.onTracking = { [weak self] state in
+            Task { @MainActor in self?.noteTracking(state) }
+        }
+        session.onNoMap = { [weak self] in
+            Task { @MainActor in self?.noteNoMap() }
+        }
+    }
+
+    func beginMarks() {
+        markTaps = []
+        candidate = nil
+        gate = .marks
+        refreshPrompt()
+    }
+
+    func retryMarks() {
+        beginMarks()
+        Haptics.undo()
+    }
+
+    func armThird() {
+        guard canAddThird else { return }
+        gate = .marks
+        refreshPrompt()
+    }
+
+    func acceptAlignment() {
+        guard let candidate else { return }
+        sessionRigid = candidate
+        pendingAlignment = candidate
+        gate = .open
+        let detail = residualText(candidate.residualM)
+        banner = candidate.residualM < 0.005 ? "Marks line up" : "Matched, \(detail)"
+        Haptics.success()
+    }
+
+    func selectGroup(_ id: String) {
+        activeGroupId = id
+        Haptics.undo()
+    }
+
+    func addBranch() {
+        var groups = fixture.groups ?? []
+        let count = groups.filter { $0.role == .branch }.count + 1
+        var identifier = "branch-\(count)"
+        if groups.contains(where: { $0.id == identifier }) {
+            identifier = UUID().uuidString
+        }
+        groups.append(FixtureGroup(id: identifier, name: "Branch \(count)", role: .branch))
+        fixture.groups = groups
+        activeGroupId = identifier
+        Haptics.undo()
+    }
+
+    func applyDrift() {
+        guard let preview = driftPreview else { return }
+        history.append(fixture)
+        if history.count > 40 { history.removeFirst() }
+        fixture = preview
+        driftOffer = nil
+        driftBefore = nil
+        showDriftAfter = false
+        banner = "Drift shared along the path"
+        Haptics.success()
+    }
+
+    func leaveDrift() {
+        driftOffer = nil
+        driftBefore = nil
+        showDriftAfter = false
+        banner = nil
+        Haptics.undo()
+    }
+
+    func stamped(_ fixture: Fixture, keepAlignment: Bool) -> Fixture {
+        var copy = fixture
+        if (copy.references ?? []).count < 2 {
+            let derived = deriveReferences(copy.waypoints)
+            if derived.count >= 2 {
+                copy.references = derived
+                copy.schemaVersion = max(copy.schemaVersion, 2)
+            }
+        }
+        if keepAlignment, let pendingAlignment {
+            var list = copy.alignments ?? []
+            list.append(pendingAlignment)
+            copy.alignments = list
+            copy.schemaVersion = max(copy.schemaVersion, 2)
+        }
+        if let groups = copy.groups, !groups.isEmpty {
+            copy.schemaVersion = max(copy.schemaVersion, 2)
+        }
+        return copy
     }
 
     func assign(_ controller: ControllerRecord, output: ControllerOutput?) {
@@ -377,7 +624,16 @@ final class CaptureModel: ObservableObject {
 
     @discardableResult
     func place(_ sample: CaptureSample) -> Bool {
-        if aligning { return align(sample.position) }
+        if driftOffer != nil { return false }
+        if gate != .open {
+            placeMark(sample)
+            return false
+        }
+        if driftArmed {
+            driftArmed = false
+            measureDrift(sample)
+            return false
+        }
         guard activeRun != nil else { return false }
         history.append(fixture)
         if history.count > 40 { history.removeFirst() }
@@ -395,84 +651,23 @@ final class CaptureModel: ObservableObject {
             inward = horizontal.normalized()
         }
         let stored = storedPosition(sample.position)
+        let isReference = driftReferenceId == nil
         let waypoint = Waypoint(
             id: UUID().uuidString,
             position: stored,
             source: sample.source,
             confidence: sample.confidence,
-            label: nil
+            label: isReference ? "Start" : nil
         )
         fixture.waypoints.append(waypoint)
+        sessionIds.append(waypoint.id)
+        if isReference { driftReferenceId = waypoint.id }
         append(waypoint.id)
         if shape == .helix, session.lidar, let radius = session.trunkRadius(at: sample.position, limit: max(0.5, radiusMm / 1000 * 3)) {
             radiusMm = radius
             refreshHelixParams()
         }
         return true
-    }
-
-    func markReference() {
-        guard !fixture.waypoints.isEmpty else { return }
-        let count = fixture.waypoints.filter { ($0.label ?? "").hasPrefix("Reference") }.count
-        fixture.waypoints[fixture.waypoints.count - 1].label = count == 0 ? "Reference A" : "Reference B"
-        Haptics.place()
-    }
-
-    func spreadDrift() {
-        guard fixture.waypoints.count >= 2 else { return }
-        let reference = fixture.waypoints.first { ($0.label ?? "").hasPrefix("Reference") } ?? fixture.waypoints[0]
-        let error = fixture.waypoints[fixture.waypoints.count - 1].position - reference.position
-        let moved = distributeDrift(fixture.waypoints.map(\.position), error: error)
-        for index in fixture.waypoints.indices {
-            fixture.waypoints[index].position = moved[index]
-        }
-        for runIndex in fixture.runs.indices {
-            guard var corrections = fixture.runs[runIndex].pixelCorrections else { continue }
-            for index in corrections.indices {
-                let fraction = driftFraction(corrections[index].index, count: fixture.runs[runIndex].pixelCount)
-                corrections[index].position = corrections[index].position - error * fraction
-            }
-            fixture.runs[runIndex].pixelCorrections = corrections
-        }
-        Haptics.success()
-    }
-
-    private func align(_ position: Vec3) -> Bool {
-        alignTaps.append(position)
-        let references = fixture.waypoints.filter { ($0.label ?? "").localizedCaseInsensitiveContains("reference") }
-        guard alignTaps.count >= 2, references.count >= 2 else {
-            notice = "Now the second reference."
-            return false
-        }
-        let moved = alignReferences(
-            sourceA: references[0].position,
-            sourceB: references[1].position,
-            destA: alignTaps[0],
-            destB: alignTaps[1],
-            points: fixture.waypoints.map(\.position)
-        )
-        for index in fixture.waypoints.indices {
-            fixture.waypoints[index].position = moved.points[index]
-        }
-        for runIndex in fixture.runs.indices {
-            guard var corrections = fixture.runs[runIndex].pixelCorrections else { continue }
-            for index in corrections.indices {
-                let shifted = alignReferences(
-                    sourceA: references[0].position,
-                    sourceB: references[1].position,
-                    destA: alignTaps[0],
-                    destB: alignTaps[1],
-                    points: [corrections[index].position]
-                )
-                corrections[index].position = shifted.points[0]
-            }
-            fixture.runs[runIndex].pixelCorrections = corrections
-        }
-        aligning = false
-        alignTaps = []
-        notice = "The earlier points now line up with those two taps."
-        Haptics.success()
-        return false
     }
 
     func scalePitch() {
@@ -502,24 +697,142 @@ final class CaptureModel: ObservableObject {
     func undo() {
         guard let previous = history.popLast() else { return }
         fixture = previous
+        if let id = driftReferenceId, !fixture.waypoints.contains(where: { $0.id == id }) {
+            driftReferenceId = nil
+        }
+        sessionIds.removeAll { id in !fixture.waypoints.contains(where: { $0.id == id }) }
+        banner = nil
         Haptics.undo()
     }
 
     func prepared() -> Fixture { fixture }
 
     private func storedPosition(_ raw: Vec3) -> Vec3 {
+        if let sessionRigid {
+            return sessionRigid.apply(raw)
+        }
         guard let frame = fixture.frame else { return raw }
         return applyFrame(raw, frame)
+    }
+
+    private var driftPreview: Fixture? {
+        guard let offer = driftOffer, let before = driftBefore else { return nil }
+        var copy = before
+        var cursor = 0
+        for index in copy.waypoints.indices where sessionIds.contains(copy.waypoints[index].id) {
+            if cursor < offer.corrected.count {
+                copy.waypoints[index].position = offer.corrected[cursor]
+            }
+            cursor += 1
+        }
+        return copy
+    }
+
+    private func measureDrift(_ sample: CaptureSample) {
+        guard let refId = driftReferenceId, let refIndex = sessionIds.firstIndex(of: refId) else { return }
+        let points = sessionIds.compactMap { id in fixture.waypoints.first(where: { $0.id == id })?.position }
+        guard let offer = try? distributeDrift(points, retap: storedPosition(sample.position), referenceIndex: refIndex) else { return }
+        driftBefore = fixture
+        driftOffer = offer
+        showDriftAfter = false
+        banner = nil
+        Haptics.place()
+    }
+
+    private func placeMark(_ sample: CaptureSample) {
+        guard gate == .marks else { return }
+        markTaps.append(sample.position)
+        Haptics.place()
+        guard markTaps.count >= 2 else {
+            refreshPrompt()
+            return
+        }
+        let count = min(markTaps.count, marks.count)
+        let used = Array(marks.prefix(count))
+        let source = Array(markTaps.prefix(count))
+        guard used.count >= 2, let rigid = try? alignSessions(source, used.map(\.position), referenceIds: used.map(\.id)) else {
+            retryMarks()
+            return
+        }
+        candidate = rigid
+        residualWarn = rigid.residualM > 0.03
+        gate = .review
+        refreshPrompt()
+    }
+
+    private func refreshPrompt() {
+        switch gate {
+        case .seeking:
+            prompt = "Finding the last scan"
+        case .marks:
+            let index = min(markTaps.count, max(marks.count - 1, 0))
+            prompt = marks.indices.contains(index) ? "Tap \(marks[index].label)" : "Tap the mark"
+        case .review:
+            prompt = residualText(candidate?.residualM ?? 0)
+        case .open:
+            break
+        }
+    }
+
+    private func residualText(_ meters: Double) -> String {
+        let centimetres = meters * 100
+        if centimetres < 0.5 { return "Marks line up" }
+        if centimetres < 10 { return String(format: "%.1f cm off", centimetres) }
+        return String(format: "%.0f cm off", centimetres)
+    }
+
+    private func noteTracking(_ state: ARCamera.TrackingState) {
+        guard gate == .seeking else { return }
+        if case .limited(.relocalizing) = state {
+            sawRelocalizing = true
+            return
+        }
+        if case .normal = state, sawRelocalizing {
+            acceptWorldMap()
+        }
+    }
+
+    private func noteNoMap() {
+        guard gate == .seeking else { return }
+        gate = .marks
+        refreshPrompt()
+    }
+
+    private func acceptWorldMap() {
+        if let frame = fixture.frame {
+            let rigid = rigidFromFrame(frame, method: .worldMap)
+            sessionRigid = rigid
+            pendingAlignment = rigid
+        }
+        gate = .open
+        banner = "Same place"
+        Haptics.success()
+    }
+
+    private func ensureTrunk() -> String {
+        var groups = fixture.groups ?? []
+        if let trunk = groups.first(where: { $0.role == .trunk }) {
+            fixture.groups = groups
+            return trunk.id
+        }
+        let trunk = FixtureGroup(id: "trunk", name: "Trunk", role: .trunk)
+        groups.insert(trunk, at: 0)
+        fixture.groups = groups
+        return trunk.id
     }
 
     private func append(_ id: String) {
         guard fixture.runs.indices.contains(active) else { return }
         let segments = fixture.runs[active].segments
-        if var last = segments.last, last.waypointIds.count < 2 || (!last.isClosed(for: shape) && last.kind == shape) {
-            if last.waypointIds.count < 2 { last.kind = shape }
+        if var last = segments.last, last.waypointIds.count < 2 || (!last.isClosed(for: shape) && last.kind == shape && last.groupId == activeGroupId) {
+            if last.waypointIds.count < 2 {
+                last.kind = shape
+                last.groupId = activeGroupId
+            }
             last.waypointIds.append(id)
             last.params = params(points: last.waypointIds.count)
             fixture.runs[active].segments[segments.count - 1] = last
+            syncRunGroup()
             return
         }
         var ids: [String] = []
@@ -528,8 +841,19 @@ final class CaptureModel: ObservableObject {
         }
         ids.append(id)
         fixture.runs[active].segments.append(
-            Segment(id: UUID().uuidString, kind: shape, waypointIds: ids, params: params(points: ids.count))
+            Segment(id: UUID().uuidString, kind: shape, waypointIds: ids, params: params(points: ids.count), groupId: activeGroupId)
         )
+        syncRunGroup()
+    }
+
+    private func syncRunGroup() {
+        guard fixture.runs.indices.contains(active) else { return }
+        let segments = fixture.runs[active].segments
+        if segments.allSatisfy({ $0.groupId == activeGroupId }) {
+            fixture.runs[active].groupId = activeGroupId
+        } else {
+            fixture.runs[active].groupId = nil
+        }
     }
 
     private func params(points: Int) -> SegmentParams {
@@ -561,6 +885,7 @@ final class CaptureModel: ObservableObject {
         var copy = run
         copy.id = UUID().uuidString
         copy.segments = []
+        copy.groupId = activeGroupId
         fixture.runs.append(copy)
         active = fixture.runs.count - 1
         Haptics.success()
@@ -611,10 +936,22 @@ struct CaptureSample {
     var source: WaypointSource
 }
 
-final class CaptureSession: ObservableObject {
+final class CaptureSession: NSObject, ObservableObject, ARSessionDelegate {
     @Published var lidar = false
     weak var view: ARView?
+    var onTracking: ((ARCamera.TrackingState) -> Void)? {
+        didSet {
+            if let lastTracking { onTracking?(lastTracking) }
+        }
+    }
+    var onNoMap: (() -> Void)? {
+        didSet {
+            if started, !loadedMap { onNoMap?() }
+        }
+    }
     private var started = false
+    private var loadedMap = false
+    private var lastTracking: ARCamera.TrackingState?
 
     func start(_ view: ARView, fixtureId: String) {
         self.view = view
@@ -629,8 +966,22 @@ final class CaptureSession: ObservableObject {
         }
         if let map = Self.loadMap(fixtureId) {
             config.initialWorldMap = map
+            loadedMap = true
         }
+        view.session.delegate = self
         view.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        if !loadedMap {
+            DispatchQueue.main.async { [weak self] in self?.onNoMap?() }
+        }
+    }
+
+    func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
+        guard loadedMap else { return }
+        let state = camera.trackingState
+        DispatchQueue.main.async { [weak self] in
+            self?.lastTracking = state
+            self?.onTracking?(state)
+        }
     }
 
     func sample() -> CaptureSample? {
@@ -704,10 +1055,6 @@ final class CaptureSession: ObservableObject {
         case .notAvailable:
             return 0
         }
-    }
-
-    static func hasMap(_ id: String) -> Bool {
-        FileManager.default.fileExists(atPath: url(id).path)
     }
 
     private static func loadMap(_ id: String) -> ARWorldMap? {

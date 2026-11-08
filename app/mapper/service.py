@@ -16,12 +16,11 @@ from app.mapper.advertise import MapperAdvertiser
 from app.mapper.compile import CompileError, compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
-from app.mapper.align import align_references, distribute_drift, drift_fraction
 from app.mapper.detect import detection_plan as planned_frames
 from app.mapper.detect import is_dark, missing_indices
-from app.mapper.effects import EFFECTS, targeted_colors
+from app.mapper.effects import EFFECTS, effect_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_polyline, xlights_xmodel
-from app.mapper.geom import normalise_points, vec3
+from app.mapper.geom import apply_frame, normalise_points, vec3
 from app.mapper.importers import import_text
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import SchemaError
@@ -153,6 +152,10 @@ class MapperService:
         ):
             waypoint["position"] = point.as_list()
         updated["frame"] = frame.as_dict()
+        if isinstance(updated.get("references"), list):
+            for item in updated["references"]:
+                if isinstance(item, dict) and "position" in item:
+                    item["position"] = apply_frame(vec3(item.get("position")), frame).as_list()
         return self.save_fixture(updated)
 
     def scale_pitch(self, fixture_id: str, run_id: str) -> dict:
@@ -190,9 +193,14 @@ class MapperService:
         return {"ok": True, "controller": mac, "output": int(output), "index": int(index)}
 
     async def start_effect(self, fixture_id: str, name: str, params: dict | None) -> dict:
-        self._require(fixture_id)
+        fixture = self._require(fixture_id)
         if name not in EFFECTS:
             raise FleetError(f"Unknown effect {name}.", 400)
+        options = params or {}
+        try:
+            effect_colors(compile_fixture(fixture), name, 0.0, options)
+        except (ValueError, CompileError) as exc:
+            raise FleetError(str(exc), 400) from exc
         async with self._lock:
             self._token += 1
             self._highlight = None
@@ -389,42 +397,6 @@ class MapperService:
         missing = missing_indices(len(compiled), observed) if seen is not None else []
         return {**saved, "detection": {"missing": missing, "needsViewpoint": bool(missing)}}
 
-    def align_session(self, fixture_id: str, source_a: list, source_b: list, dest_a: list, dest_b: list) -> dict:
-        fixture = json.loads(json.dumps(self._require(fixture_id)))
-        waypoints = [item for item in fixture.get("waypoints") or [] if isinstance(item, dict)]
-        points = [vec3(item.get("position")) for item in waypoints]
-        moved, _yaw = align_references(vec3(source_a), vec3(source_b), vec3(dest_a), vec3(dest_b), points)
-        for waypoint, point in zip(waypoints, moved):
-            waypoint["position"] = [point.x, point.y, point.z]
-        for run in fixture.get("runs") or []:
-            if not isinstance(run, dict):
-                continue
-            for item in run.get("pixelCorrections") or []:
-                if not isinstance(item, dict):
-                    continue
-                shifted, _yaw = align_references(vec3(source_a), vec3(source_b), vec3(dest_a), vec3(dest_b), [vec3(item.get("position"))])
-                item["position"] = [shifted[0].x, shifted[0].y, shifted[0].z]
-        return self.save_fixture(fixture)
-
-    def spread_drift(self, fixture_id: str, error: list) -> dict:
-        fixture = json.loads(json.dumps(self._require(fixture_id)))
-        waypoints = [item for item in fixture.get("waypoints") or [] if isinstance(item, dict)]
-        points = [vec3(item.get("position")) for item in waypoints]
-        offset = vec3(error)
-        moved = distribute_drift(points, offset)
-        for waypoint, point in zip(waypoints, moved):
-            waypoint["position"] = [point.x, point.y, point.z]
-        for run in fixture.get("runs") or []:
-            if not isinstance(run, dict):
-                continue
-            count = int(run.get("pixelCount") or 0)
-            for item in run.get("pixelCorrections") or []:
-                if not isinstance(item, dict) or not isinstance(item.get("index"), int):
-                    continue
-                point = vec3(item.get("position")) - offset * drift_fraction(item["index"], count)
-                item["position"] = [point.x, point.y, point.z]
-        return self.save_fixture(fixture)
-
     def import_document(
         self,
         text: str,
@@ -489,15 +461,10 @@ class MapperService:
             fixture = self.store.get(payload["fixtureId"])
             if fixture is None or token != self._token:
                 return
-            seconds = _seconds(payload.get("params") or {})
+            options = payload.get("params") or {}
+            seconds = _seconds(options)
             phase = ((time.monotonic() - payload["started"]) / seconds) % 1.0
-            await self._send_fixture(
-                fixture,
-                effect=payload["name"],
-                phase=phase,
-                params=payload.get("params") or {},
-                token=token,
-            )
+            await self._send_fixture(fixture, effect=payload["name"], phase=phase, params=options, token=token)
         self._frames += 1
         now = time.monotonic()
         elapsed = now - self._fps_mark
@@ -547,7 +514,7 @@ class MapperService:
         if black or effect is None:
             colors = [(0, 0, 0)] * len(pixels)
         else:
-            colors = targeted_colors(compiled, effect, phase, params, fixture)
+            colors = effect_colors(compiled, effect, phase, params or {})
         grouped: dict[str, dict[int, tuple[int, int, int]]] = {}
         orders: dict[str, int] = {}
         for pixel, color in zip(pixels, colors):
