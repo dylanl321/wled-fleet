@@ -218,3 +218,41 @@ export function frameAt(frames, now) {
   const amount = Math.max(0, Math.min(1, (lag - frames.previousAt) / span));
   return blendFrames(frames.previous, frames.leds, amount);
 }
+
+/**
+ * Draw a Look as a small grid of individual LEDs, like a matrix running the
+ * effect. `render(count, now)` returns `count` RGB triples for the strip; the
+ * strip is laid out row by row, so chases, wipes and twinkles read as they
+ * would on real pixels.
+ */
+export function drawMatrix(canvas, render, now, options = {}) {
+  if (!canvas || !canvas.isConnected) return;
+  const { width, height, dpr } = ensureSize(canvas);
+  const ctx = canvas.getContext("2d", { alpha: false });
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const cols = options.cols || 14;
+  const rows = options.rows || Math.max(1, Math.round((cols * height) / width));
+  const pixels = render(cols * rows, now).map(toScreen);
+  const cellX = width / cols;
+  const cellY = height / rows;
+  const gap = Math.max(1, Math.min(cellX, cellY) * 0.22);
+  const dotW = cellX - gap;
+  const dotH = cellY - gap;
+  const radius = Math.min(dotW, dotH) * 0.28;
+  ctx.fillStyle = "#050506";
+  ctx.fillRect(0, 0, width, height);
+  for (let row = 0; row < rows; row += 1) {
+    for (let col = 0; col < cols; col += 1) {
+      const color = pixels[row * cols + col] || [0, 0, 0];
+      const level = Math.max(color[0], color[1], color[2]);
+      const x = col * cellX + gap / 2;
+      const y = row * cellY + gap / 2;
+      // Unlit LEDs stay faintly visible, like a real matrix.
+      ctx.fillStyle = level < 10 ? "rgb(22,22,25)" : `rgb(${color[0]},${color[1]},${color[2]})`;
+      ctx.beginPath();
+      if (ctx.roundRect) ctx.roundRect(x, y, dotW, dotH, radius);
+      else ctx.rect(x, y, dotW, dotH);
+      ctx.fill();
+    }
+  }
+}

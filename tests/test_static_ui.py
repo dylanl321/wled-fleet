@@ -42,3 +42,10 @@ def test_ribbons_draw_light_not_wood():
     # Candle and fire flicker in smooth patches, not per-LED stripes toward dark red.
     assert "index * 1.7" not in EFFECTS
     assert "function smooth(" in EFFECTS
+
+
+def test_looks_are_drawn_as_led_grids():
+    assert "export function drawMatrix(" in RIBBON
+    assert "drawMatrix(canvas" in MAIN
+    # Colorloop is one color at a time across the strip, not a rainbow.
+    assert 'name.includes("colorloop")' in EFFECTS

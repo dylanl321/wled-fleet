@@ -1,5 +1,5 @@
 import { dominant, renderEffect } from "./effects.js";
-import { drawRibbon, frameAt } from "./ribbon.js";
+import { drawMatrix, drawRibbon, frameAt } from "./ribbon.js";
 
 const ENGAGE_X = 12;
 const CANCEL_Y = 6;
@@ -931,8 +931,7 @@ function tick(now) {
   document.querySelectorAll("[data-swatch]").forEach((canvas) => {
     const look = lookById(canvas.dataset.swatch);
     if (!look) return;
-    const pixels = renderEffect({ ...look, on: true, bri: 255 }, 24, now);
-    drawRibbon(canvas, pixels, { now });
+    drawMatrix(canvas, (count, at) => renderEffect({ ...look, on: true, bri: 255 }, count, at), now);
   });
   requestAnimationFrame(tick);
 }

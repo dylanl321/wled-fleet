@@ -180,7 +180,7 @@ button {
   z-index: 1;
 }
 
-.ribbon, .swatch canvas {
+.ribbon {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -329,28 +329,36 @@ button {
 }
 .look-tray::-webkit-scrollbar { display: none; }
 
+/* A Look is a small LED grid with its name underneath, never on top of the dots. */
 .swatch {
   flex: none;
   width: 88px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  scroll-snap-align: center;
+}
+.swatch canvas {
+  position: relative;
+  inset: auto;
+  width: 88px;
   height: 88px;
   border-radius: 16px;
-  position: relative;
-  overflow: hidden;
-  scroll-snap-align: center;
-  background: #19191c;
-  border: 2px solid transparent;
+  display: block;
+  background: #050506;
 }
-.swatch.is-current { border-color: rgba(255, 255, 255, 0.85); }
+.swatch.is-current canvas { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.9); }
 .swatch span {
-  position: absolute;
-  left: 6px;
-  right: 6px;
-  bottom: 6px;
-  font-size: 11px;
+  max-width: 88px;
+  font-size: 12px;
   font-weight: 600;
-  color: white;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.7);
+  color: var(--secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.swatch.is-current span { color: var(--text-strong); }
 
 .preview-note, .hint {
   color: var(--secondary);
