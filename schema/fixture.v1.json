@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dylanl321/wled-fleet/schema/fixture.v1.json",
+  "title": "WLED Mapper Fixture",
+  "description": "One fixture document. schemaVersion 1 is the original fixture. schemaVersion 2 may also carry groups, reference marks, session alignments, and camera pixelCorrections. A version 1 document stays valid, and those fields are optional on both versions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "id", "name", "origin", "surfaceHint", "waypoints", "runs"],
+  "properties": {
+    "schemaVersion": {
+      "description": "1 is the original fixture. 2 adds optional groups, reference marks, alignments, and camera pixel corrections. Readers accept both.",
+      "enum": [1, 2]
+    },
+    "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+    "origin": { "$ref": "#/$defs/origin" },
+    "surfaceHint": { "enum": ["planar", "cylindrical", "branching", "freeform"] },
+    "waypoints": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/waypoint" }
+    },
+    "runs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/run" }
+    },
+    "pixelCorrections": {
+      "type": "array",
+      "description": "Measured positions that override the compiled pixel. Absent on captures made before camera detection.",
+      "items": { "$ref": "#/$defs/pixelCorrection" }
+    },
+    "frame": { "$ref": "#/$defs/frame" },
+    "groups": {
+      "type": "array",
+      "description": "Named parts of a branching fixture, such as the trunk and each limb.",
+      "items": { "$ref": "#/$defs/group" }
+    },
+    "references": {
+      "type": "array",
+      "description": "Labelled marks in the fixture frame. A later session re-taps two of them, or three when the yaw needs to be more robust.",
+      "items": { "$ref": "#/$defs/referencePoint" }
+    },
+    "alignments": {
+      "type": "array",
+      "description": "Rigid transforms that brought a later capture into this fixture frame.",
+      "items": { "$ref": "#/$defs/alignment" }
+    },
+    "createdAt": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "updatedAt": { "type": "string", "minLength": 1, "maxLength": 40 }
+  },
+  "$defs": {
+    "vec3": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "type": "number" }
+    },
+    "quat": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": { "type": "number" },
+      "description": "Orientation quaternion as [x, y, z, w]."
+    },
+    "origin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["position", "orientation"],
+      "properties": {
+        "position": { "$ref": "#/$defs/vec3" },
+        "orientation": { "$ref": "#/$defs/quat" }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["translation", "yawRadians"],
+      "description": "Transform applied to raw capture points so the saved fixture has y up, the lowest point at y=0, the centroid on the y axis, and the first pixel facing +z.",
+      "properties": {
+        "translation": { "$ref": "#/$defs/vec3" },
+        "yawRadians": { "type": "number" }
+      }
+    },
+    "waypoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "position", "source", "confidence"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "source": { "enum": ["tapped", "lidarSnapped", "typed", "imported", "estimated", "detected"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "label": { "type": ["string", "null"], "maxLength": 80 }
+      }
+    },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "controllerId", "outputIndex", "startIndex", "pixelCount", "pitchMm", "colorOrder", "segments"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "controllerId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "outputIndex": { "type": "integer", "minimum": 0 },
+        "startIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Index of this run's first pixel on its own output. Usually 0. This is not the controller-wide offset; the server adds the output's hw.led.ins start when it addresses WLED."
+        },
+        "pixelCount": { "type": "integer", "minimum": 0 },
+        "pitchMm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
+        "colorOrder": { "enum": ["GRB", "RGB", "BRG", "RBG", "BGR", "GBR", "GRBW", "RGBW", "BRGW", "RBGW", "BGRW", "GBRW"] },
+        "groupId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 },
+        "segments": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/segment" }
+        }
+      }
+    },
+    "segment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "waypointIds", "params"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "kind": { "enum": ["straight", "polyline", "helix", "curve", "jump"] },
+        "waypointIds": {
+          "type": "array",
+          "minItems": 2,
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        },
+        "params": { "type": "object" },
+        "pixelCountOverride": { "type": ["integer", "null"], "minimum": 0 },
+        "groupId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "role"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "role": { "enum": ["trunk", "branch"] }
+      }
+    },
+    "referencePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "position"],
+      "description": "A labelled mark stored in the fixture frame, metres, y up.",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "label": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "waypointId": { "type": ["string", "null"], "minLength": 1, "maxLength": 80 }
+      }
+    },
+    "alignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "method", "rotation", "translation", "yawRadians", "residualM"],
+      "description": "Version 1 rigid transform from a capture session into the fixture frame. Two marks use a gravity-aligned yaw and a translation. Three or more use Kabsch. worldMap means ARKit relocalised and the stored frame was enough.",
+      "properties": {
+        "version": { "const": 1 },
+        "method": { "enum": ["worldMap", "yawTranslation", "kabsch"] },
+        "rotation": {
+          "type": "array",
+          "minItems": 9,
+          "maxItems": 9,
+          "description": "Row-major 3x3 rotation. Applied before translation: p' = R p + t.",
+          "items": { "type": "number" }
+        },
+        "translation": { "$ref": "#/$defs/vec3" },
+        "yawRadians": { "type": "number" },
+        "residualM": { "type": "number", "minimum": 0 },
+        "referenceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 80 }
+        }
+      }
+    },
+    "pixelCorrection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "runId", "index", "position", "confidence", "method"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "runId": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "index": { "type": "integer", "minimum": 0 },
+        "position": { "$ref": "#/$defs/vec3" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "method": { "enum": ["segment", "triangulated"] },
+        "viewpoints": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    }
+  }
+}

@@ -2,7 +2,7 @@ name: Publish image
 
 on:
   push:
-    branches: [main, lumen]
+    branches: [main, lumen, mapper]
 
 permissions:
   contents: read
@@ -39,6 +39,7 @@ jobs:
             type=raw,value=${{ steps.version.outputs.version }},enable=${{ github.ref_name == 'main' }}
             type=sha,format=long,enable=${{ github.ref_name == 'main' }}
             type=raw,value=lumen,enable=${{ github.ref_name == 'lumen' }}
+            type=raw,value=mapper,enable=${{ github.ref_name == 'mapper' }}
 
       - uses: docker/build-push-action@v6
         with:

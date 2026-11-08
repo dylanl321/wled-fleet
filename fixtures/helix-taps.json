@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "id": "55555555-5555-4555-8555-555555555555",
+  "name": "Helix taps",
+  "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
+  "surfaceHint": "cylindrical",
+  "waypoints": [
+    {"id": "55555555-5555-4555-8555-000000000001", "position": [0.2, 0, 0], "source": "tapped", "confidence": 1, "label": "Turn 0"},
+    {"id": "55555555-5555-4555-8555-000000000002", "position": [0.2, 0.4, 0], "source": "tapped", "confidence": 1, "label": "Turn 1"},
+    {"id": "55555555-5555-4555-8555-000000000003", "position": [0.2, 0.8, 0], "source": "tapped", "confidence": 1, "label": "Turn 2"},
+    {"id": "55555555-5555-4555-8555-000000000004", "position": [0.2, 1.2, 0], "source": "tapped", "confidence": 1, "label": "Turn 3"}
+  ],
+  "runs": [
+    {
+      "id": "run-helix",
+      "controllerId": "aa:bb:cc:dd:ee:05",
+      "outputIndex": 0,
+      "startIndex": 0,
+      "pixelCount": 116,
+      "pitchMm": 16.666666666666668,
+      "colorOrder": "GRB",
+      "segments": [
+        {
+          "id": "seg-helix",
+          "kind": "helix",
+          "waypointIds": [
+            "55555555-5555-4555-8555-000000000001",
+            "55555555-5555-4555-8555-000000000002",
+            "55555555-5555-4555-8555-000000000003",
+            "55555555-5555-4555-8555-000000000004"
+          ],
+          "params": {"radiusStartMm": 80, "radiusEndMm": 80, "handedness": "ccw", "inward": [-1, 0, 0]}
+        }
+      ]
+    }
+  ]
+}

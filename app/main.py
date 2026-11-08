@@ -22,6 +22,8 @@ from app.discovery import normalize_mac
 from app.errors import FleetError
 from app.fleet import Fleet
 from app.lumen import Lumen, mount_lumen
+from app.mapper.routes import mount_mapper
+from app.mapper.service import MapperService
 from app.util import clean_name
 from app.schemas import (
     ApplyIn,
@@ -142,12 +144,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         fleet = Fleet(db, settings, http)
         lumen = Lumen(fleet)
+        mapper = MapperService(fleet, settings)
         app.state.db = db
         app.state.http = http
         app.state.fleet = fleet
         app.state.lumen = lumen
+        app.state.mapper = mapper
         app.state.session_secret = load_secret(settings.data_dir / "session.key")
         app.state.login_failures = {}
+        mapper.start()
         tasks = [asyncio.create_task(fleet.run_jobs()), asyncio.create_task(lumen.run())]
         if settings.scheduler_enabled:
             tasks.append(asyncio.create_task(fleet.run_maintenance()))
@@ -157,6 +162,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         finally:
             fleet.stop()
             lumen.stop()
+            await mapper.stop()
             for task in tasks:
                 task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
@@ -244,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/status")
     async def status(request: Request) -> dict:
         fleet = fleet_of(request)
+        mapper = getattr(request.app.state, "mapper", None)
         return {
             "version": settings.app_version,
             "auth": bool(settings.admin_password),
@@ -251,6 +258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mdns": fleet.mdns.ready,
             "mdns_error": fleet.mdns.error,
             "scan": fleet.last_scan,
+            "xlightsDrift": mapper.status.get("xlightsDrift") if mapper is not None else None,
         }
 
     @app.get("/api/devices")
@@ -662,6 +670,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"results": results}
 
     mount_lumen(app)
+    mount_mapper(app)
     if (STATIC).exists():
         app.mount("/static", StaticFiles(directory=STATIC), name="static")
     return app

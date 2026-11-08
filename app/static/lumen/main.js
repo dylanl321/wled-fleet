@@ -1023,8 +1023,8 @@ function onPointerMove(event) {
     const node = document.querySelector(`[data-light="${current.light}"] .pct`);
     if (node) node.textContent = `${pct(bri)}%`;
     const now = performance.now();
-    if (now - (current.sent || 0) > 100) {
-      current.sent = now;
+    if (now - lastPreview >= PREVIEW_MS) {
+      lastPreview = now;
       sendApply({ light_ids: [Number(current.light)], kind: "preview", bri, on: bri > 0, tt_ms: 0 }).catch(() => {});
     }
   }
@@ -1453,7 +1453,7 @@ function paintColor(color, commit) {
   const look = { ...solid, colors: [color, [0, 0, 0], [0, 0, 0]], effect: "Solid" };
   state.draft = look;
   const now = performance.now();
-  if (!commit && now - colorSent < 100) {
+  if (!commit && now - lastPreview < PREVIEW_MS) {
     for (const id of state.selection) state.override[id] = { ...look, on: true, bri: lightById(id)?.bri ?? 255 };
     return;
   }
@@ -1476,8 +1476,9 @@ function dial(name, value, commit) {
       state.override[id] = { ...(state.override[id] || light), bri: value, on: value > 0 };
     }
     const now = performance.now();
-    if (!commit && now - dialSent < 100) return;
+    if (!commit && now - lastPreview < PREVIEW_MS) return;
     dialSent = now;
+    if (!commit) lastPreview = now;
     if (commit) {
       const before = snapshot(ids);
       rememberUndo(`${selectionLabel()} → ${pct(value)}%`, before);
@@ -1489,8 +1490,9 @@ function dial(name, value, commit) {
   state.draft = { ...state.draft, [name]: value };
   for (const id of ids) state.override[id] = { ...state.draft, on: true, bri: lightById(id)?.bri ?? 255 };
   const now = performance.now();
-  if (!commit && now - dialSent < 100) return;
+  if (!commit && now - lastPreview < PREVIEW_MS) return;
   dialSent = now;
+  if (!commit) lastPreview = now;
   const body = {
     light_ids: ids,
     kind: commit ? "commit" : "preview",

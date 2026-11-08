@@ -1,0 +1,75 @@
+name: iOS
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode
+        run: xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate the Xcode project
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Choose a simulator
+        id: simulator
+        run: |
+          python3 - << 'PY' >> "$GITHUB_OUTPUT"
+          import json, subprocess
+          raw = subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"])
+          data = json.loads(raw)
+          chosen = None
+          for runtime, devices in data.get("devices", {}).items():
+              if "iOS" not in runtime:
+                  continue
+              for device in devices:
+                  if device.get("isAvailable") and str(device.get("name", "")).startswith("iPhone"):
+                      chosen = device["udid"]
+          if not chosen:
+              raise SystemExit("no iPhone simulator is available")
+          print(f"udid={chosen}")
+          PY
+
+      - name: Boot the simulator
+        run: |
+          xcrun simctl boot "${{ steps.simulator.outputs.udid }}" || true
+          xcrun simctl bootstatus "${{ steps.simulator.outputs.udid }}" -b
+
+      - name: Build and test
+        working-directory: ios
+        run: |
+          xcodebuild test \
+            -project WLEDMapper.xcodeproj \
+            -scheme WLEDMapper \
+            -destination "id=${{ steps.simulator.outputs.udid }}" \
+            -resultBundlePath "$PWD/TestResults.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      - name: Collect screenshots
+        if: always()
+        run: |
+          mkdir -p screenshots
+          xcrun xcresulttool export attachments \
+            --path ios/TestResults.xcresult \
+            --output-path screenshots \
+            || true
+          find ios/TestResults.xcresult -name '*.png' -exec cp {} screenshots/ \; || true
+          find screenshots -type f | head
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-screenshots
+          path: screenshots
+          if-no-files-found: warn

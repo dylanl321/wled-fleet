@@ -1,0 +1,85 @@
+name: WLEDMapper
+options:
+  bundleIdPrefix: com.dylanl321
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+settings:
+  SWIFT_VERSION: "5.0"
+  MARKETING_VERSION: "1.0.0"
+  CURRENT_PROJECT_VERSION: "1"
+  TARGETED_DEVICE_FAMILY: "1,2"
+packages:
+  MapperGeometry:
+    path: MapperGeometry
+targets:
+  WLEDMapper:
+    type: application
+    platform: iOS
+    sources:
+      - path: WLEDMapper
+      - path: ../fixtures/straight-1m.json
+        buildPhase: resources
+      - path: ../fixtures/wall-outline.json
+        buildPhase: resources
+      - path: ../fixtures/branching-tree.json
+        buildPhase: resources
+    dependencies:
+      - package: MapperGeometry
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.dylanl321.wledmapper
+        PRODUCT_NAME: WLEDMapper
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: WLED Mapper
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSCameraUsageDescription: WLED Mapper uses the camera to place the path of each LED strip and to find each pixel in the dark.
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: WLED Mapper finds the WLED Fleet server on your home network.
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: WLEDMapper/Info.plist
+      properties:
+        NSBonjourServices:
+          - _wledmapper._tcp
+        ITSAppUsesNonExemptEncryption: false
+        UIRequiresFullScreen: true
+  WLEDMapperTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: WLEDMapperTests
+      - path: ../fixtures/straight-1m.json
+        buildPhase: resources
+    dependencies:
+      - target: WLEDMapper
+      - package: MapperGeometry
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.dylanl321.wledmapper.tests
+  WLEDMapperUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: WLEDMapperUITests
+    dependencies:
+      - target: WLEDMapper
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: com.dylanl321.wledmapper.uitests
+        TEST_TARGET_NAME: WLEDMapper
+schemes:
+  WLEDMapper:
+    build:
+      targets:
+        WLEDMapper: all
+        WLEDMapperTests: [test]
+        WLEDMapperUITests: [test]
+    test:
+      targets:
+        - WLEDMapperTests
+        - WLEDMapperUITests

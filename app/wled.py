@@ -124,6 +124,19 @@ class WledClient:
         if passphrase:
             await self.post_cfg(device, {"ota": {"psk": passphrase, "lock": False}})
 
+    async def put_file(self, device: dict, filename: str, data: bytes) -> None:
+        """Upload a file through WLED's /edit page. Ledmaps use this, not /upload."""
+        await self.unlock(device)
+        safe = filename.rsplit("/", 1)[-1]
+        files = {safe: (safe, data, "application/json")}
+        await self._request(
+            "POST",
+            device,
+            "/edit",
+            files=files,
+            timeout=httpx.Timeout(20.0, connect=3.0),
+        )
+
     async def upload(self, device: dict, filename: str, data: bytes, content_type: str) -> None:
         await self.unlock(device)
         files = {"file": (filename, data, content_type)}

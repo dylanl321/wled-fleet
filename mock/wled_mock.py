@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 
 import uvicorn
 from fastapi import FastAPI, Request, WebSocket
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from zeroconf import IPVersion, ServiceInfo, Zeroconf
 
 log = logging.getLogger("wled-mock")
@@ -108,6 +108,7 @@ class MockDevice:
             "udpn": {"send": False, "recv": True},
         }
         self._install_buses()
+        self.files: dict[str, bytes] = {}
         self._lock = threading.Lock()
 
     def bus_tuples(self) -> list[tuple[int, int, int]]:
@@ -333,6 +334,7 @@ class MockDevice:
             return "File Uploaded!"
         if name == "wsec.json":
             raise ValueError("refusing wsec.json")
+        self.files[name] = raw
         return "File Uploaded!"
 
     def store_firmware(self, filename: str, raw: bytes) -> None:
@@ -576,6 +578,10 @@ def build_app(device: MockDevice) -> FastAPI:
             ]
         }
 
+    @app.post("/edit")
+    async def edit(request: Request):
+        return await upload(request)
+
     @app.post("/upload")
     async def upload(request: Request):
         if not device.authorized({}):
@@ -619,6 +625,13 @@ def build_app(device: MockDevice) -> FastAPI:
             "live": device.live_client is not None,
             "writes": device.writes[-80:],
         }
+
+    @app.get("/{filename}")
+    async def stored_file(filename: str):
+        raw = device.files.get(filename)
+        if raw is None:
+            return PlainTextResponse("not found", status_code=404)
+        return Response(content=raw, media_type="application/json")
 
     @app.websocket("/ws")
     async def socket(ws: WebSocket) -> None:

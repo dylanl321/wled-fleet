@@ -704,6 +704,9 @@ class Fleet:
         self.event("info", "device.identify", f"Flashed {device['name']}", mac)
 
     async def reboot_device(self, mac: str) -> dict:
+        owner = self.db.get_ownership(mac)
+        if owner and owner.get("owner") == "xlights":
+            raise FleetError("A show is running on this controller. Reboot waits until the show ends.", 409)
         async with self.lock(mac):
             device = self._require(mac)
             self.activity[mac] = "rebooting"

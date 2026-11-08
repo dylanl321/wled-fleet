@@ -6,6 +6,8 @@ The phone UI is Lumen. Home is a list of live ribbons, one per light, grouped in
 
 A preview image is published from the `lumen` branch as `ghcr.io/dylanl321/wled-fleet:lumen`. It does not move `:latest`. On TrueNAS, change the image tag to `lumen` to try it, and leave the data volume where it is. Existing controllers and backups are kept; groups become zones and each output becomes a light.
 
+WLED Mapper is the iPhone app in `ios/`. Its server additions ship as `ghcr.io/dylanl321/wled-fleet:mapper` from the `mapper` branch and also leave `:latest` alone. Point the TrueNAS image tag at `mapper` to try mapping. Fixtures are JSON files under the data volume (`fixtures/`), next to the existing database. The first start copies `fleet.db` to `migration-backups/fleet-before-mapper.db`. How to put the app on an iPhone is in `ios/README.md`.
+
 ## What it does
 
 - Listens for `_wled._tcp` and `_http._tcp`, and sweeps any subnets you configure by requesting `/json/info`. Controllers are tracked by MAC, so a DHCP address change does not create a second device. A controller that already knows its neighbors (`/json/nodes`) is asked for them too.
