@@ -15,7 +15,24 @@ public func compile(_ fixture: Fixture) throws -> [MappedPixel] {
     for run in fixture.runs {
         pixels.append(contentsOf: try compileRun(fixture.name, run, index))
     }
-    return pixels
+    return applyPixelCorrections(pixels, fixture)
+}
+
+func applyPixelCorrections(_ pixels: [MappedPixel], _ fixture: Fixture) -> [MappedPixel] {
+    guard !fixture.pixelCorrections.isEmpty else { return pixels }
+    let located = Dictionary(fixture.pixelCorrections.map { ("\($0.runId):\($0.index)", $0) }, uniquingKeysWith: { _, latest in latest })
+    return pixels.map { pixel in
+        guard let run = fixture.runs.first(where: { run in
+            run.controllerId == pixel.controller
+                && run.outputIndex == pixel.output
+                && run.segments.contains { $0.id == pixel.segment }
+        }), let fix = located["\(run.id):\(pixel.index)"] else { return pixel }
+        var moved = pixel
+        moved.x = fix.position.x
+        moved.y = fix.position.y
+        moved.z = fix.position.z
+        return moved
+    }
 }
 
 public func validateCounts(_ fixture: Fixture, pixels: [MappedPixel]? = nil) throws -> [RunReport] {

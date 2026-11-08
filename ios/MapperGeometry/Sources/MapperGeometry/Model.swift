@@ -13,6 +13,66 @@ public enum WaypointSource: String, Codable {
     case typed
     case imported
     case estimated
+    case detected
+}
+
+public enum CorrectionMethod: String, Codable {
+    case segment
+    case triangulated
+}
+
+public struct PixelCorrection: Equatable, Codable, Identifiable {
+    public var id: String
+    public var runId: String
+    public var index: Int
+    public var position: Vec3
+    public var confidence: Double
+    public var method: CorrectionMethod
+    public var viewpoints: Int
+
+    public init(
+        id: String,
+        runId: String,
+        index: Int,
+        position: Vec3,
+        confidence: Double,
+        method: CorrectionMethod,
+        viewpoints: Int = 1
+    ) {
+        self.id = id
+        self.runId = runId
+        self.index = index
+        self.position = position
+        self.confidence = confidence
+        self.method = method
+        self.viewpoints = viewpoints
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, runId, index, position, confidence, method, viewpoints
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        runId = try container.decode(String.self, forKey: .runId)
+        index = try container.decode(Int.self, forKey: .index)
+        position = try container.decode(Vec3.self, forKey: .position)
+        confidence = try container.decode(Double.self, forKey: .confidence)
+        method = try container.decode(CorrectionMethod.self, forKey: .method)
+        viewpoints = try container.decodeIfPresent(Int.self, forKey: .viewpoints) ?? 1
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(runId, forKey: .runId)
+        try container.encode(index, forKey: .index)
+        try container.encode(position, forKey: .position)
+        try container.encode(confidence, forKey: .confidence)
+        try container.encode(method, forKey: .method)
+        try container.encode(viewpoints, forKey: .viewpoints)
+    }
 }
 
 public enum SegmentKind: String, Codable, CaseIterable {
@@ -259,12 +319,13 @@ public struct Fixture: Equatable, Codable, Identifiable {
     public var surfaceHint: SurfaceHint
     public var waypoints: [Waypoint]
     public var runs: [Run]
+    public var pixelCorrections: [PixelCorrection]
     public var frame: FrameTransform?
     public var createdAt: String?
     public var updatedAt: String?
 
     private enum CodingKeys: String, CodingKey {
-        case schemaVersion, id, name, origin, surfaceHint, waypoints, runs, frame, createdAt, updatedAt
+        case schemaVersion, id, name, origin, surfaceHint, waypoints, runs, pixelCorrections, frame, createdAt, updatedAt
     }
 
     public init(
@@ -275,6 +336,7 @@ public struct Fixture: Equatable, Codable, Identifiable {
         surfaceHint: SurfaceHint,
         waypoints: [Waypoint],
         runs: [Run],
+        pixelCorrections: [PixelCorrection] = [],
         frame: FrameTransform? = nil,
         createdAt: String? = nil,
         updatedAt: String? = nil
@@ -286,6 +348,7 @@ public struct Fixture: Equatable, Codable, Identifiable {
         self.surfaceHint = surfaceHint
         self.waypoints = waypoints
         self.runs = runs
+        self.pixelCorrections = pixelCorrections
         self.frame = frame
         self.createdAt = createdAt
         self.updatedAt = updatedAt
@@ -300,6 +363,7 @@ public struct Fixture: Equatable, Codable, Identifiable {
         surfaceHint = try container.decode(SurfaceHint.self, forKey: .surfaceHint)
         waypoints = try container.decode([Waypoint].self, forKey: .waypoints)
         runs = try container.decode([Run].self, forKey: .runs)
+        pixelCorrections = try container.decodeIfPresent([PixelCorrection].self, forKey: .pixelCorrections) ?? []
         frame = try container.decodeIfPresent(FrameTransform.self, forKey: .frame)
         createdAt = try container.decodeIfPresent(String.self, forKey: .createdAt)
         updatedAt = try container.decodeIfPresent(String.self, forKey: .updatedAt)
@@ -314,6 +378,9 @@ public struct Fixture: Equatable, Codable, Identifiable {
         try container.encode(surfaceHint, forKey: .surfaceHint)
         try container.encode(waypoints, forKey: .waypoints)
         try container.encode(runs, forKey: .runs)
+        if !pixelCorrections.isEmpty {
+            try container.encode(pixelCorrections, forKey: .pixelCorrections)
+        }
         try container.encodeIfPresent(self.frame, forKey: CodingKeys.frame)
         try container.encodeIfPresent(createdAt, forKey: CodingKeys.createdAt)
         try container.encodeIfPresent(updatedAt, forKey: CodingKeys.updatedAt)

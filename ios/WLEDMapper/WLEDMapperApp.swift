@@ -18,6 +18,7 @@ struct WLEDMapperApp: App {
 enum Route: Hashable {
     case fixture(String)
     case capture(String)
+    case find(String)
 }
 
 struct RootView: View {
@@ -32,6 +33,8 @@ struct RootView: View {
                         FixtureScreen(fixtureId: id)
                     case .capture(let id):
                         CaptureScreen(fixtureId: id)
+                    case .find(let id):
+                        FindScreen(fixtureId: id)
                     }
                 }
         }

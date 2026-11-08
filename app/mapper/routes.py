@@ -69,6 +69,20 @@ def mount_mapper(app) -> None:
     async def scale_pitch(fixture_id: str, run_id: str, request: Request) -> dict:
         return mapper_of(request).scale_pitch(fixture_id, run_id)
 
+    @router.post("/fixtures/{fixture_id}/detect")
+    async def begin_detect(fixture_id: str, request: Request) -> dict:
+        body = await _body(request)
+        return await mapper_of(request).begin_detect(fixture_id, body.get("runId"), body.get("mode") or "binary")
+
+    @router.post("/fixtures/{fixture_id}/detect/{session_id}/finish")
+    async def finish_detect(fixture_id: str, session_id: str, request: Request) -> dict:
+        return await mapper_of(request).finish_detect(fixture_id, session_id)
+
+    @router.post("/fixtures/{fixture_id}/detect/{session_id}")
+    async def step_detect(fixture_id: str, session_id: str, request: Request) -> dict:
+        body = await _body(request)
+        return await mapper_of(request).step_detect(fixture_id, session_id, body.get("step"))
+
     @router.post("/fixtures/{fixture_id}/highlight")
     async def highlight(fixture_id: str, request: Request) -> dict:
         body = await _body(request)

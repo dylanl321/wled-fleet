@@ -27,6 +27,10 @@ struct FixtureScreen: View {
                     .accessibilityIdentifier("screen.preview")
                 effects
                 if !previewOnly {
+                    BigButton(title: "Find every pixel") {
+                        model.path.append(Route.find(fixtureId))
+                    }
+                    .accessibilityIdentifier("fixture.find")
                     HStack(spacing: 10) {
                         BigButton(title: "Capture", prominent: false) {
                             model.path.append(Route.capture(fixtureId))

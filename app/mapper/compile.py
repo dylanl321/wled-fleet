@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from app.mapper.geom import (
     EPS,
@@ -221,7 +221,52 @@ def compile_fixture(fixture: dict) -> list[Pixel]:
     for run in fixture.get("runs") or []:
         if isinstance(run, dict):
             pixels.extend(compile_run(name, run, waypoints))
-    return pixels
+    return apply_pixel_corrections(fixture, pixels)
+
+
+def apply_pixel_corrections(fixture: dict, pixels: list[Pixel]) -> list[Pixel]:
+    """Measured camera positions override the shape. The path itself stays."""
+    corrections = fixture.get("pixelCorrections")
+    if not isinstance(corrections, list) or not corrections:
+        return pixels
+    runs = [run for run in fixture.get("runs") or [] if isinstance(run, dict)]
+    located: dict[tuple[str, int], list] = {}
+    for item in corrections:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("runId")
+        index = item.get("index")
+        position = item.get("position")
+        if not isinstance(run_id, str) or isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if not isinstance(position, list) or len(position) != 3:
+            continue
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in position):
+            continue
+        located[(run_id, index)] = position
+    if not located:
+        return pixels
+    updated: list[Pixel] = []
+    for pixel in pixels:
+        run_id = _run_id_for(runs, pixel)
+        position = located.get((run_id, pixel.index)) if run_id else None
+        if position is None:
+            updated.append(pixel)
+            continue
+        updated.append(replace(pixel, x=float(position[0]), y=float(position[1]), z=float(position[2])))
+    return updated
+
+
+def _run_id_for(runs: list[dict], pixel: Pixel) -> str | None:
+    for run in runs:
+        if str(run.get("controllerId") or "") != pixel.controller:
+            continue
+        if int(run.get("outputIndex") or 0) != pixel.output:
+            continue
+        segments = run.get("segments") if isinstance(run.get("segments"), list) else []
+        if any(isinstance(segment, dict) and segment.get("id") == pixel.segment for segment in segments):
+            return str(run.get("id") or "")
+    return None
 
 
 def validate_counts(fixture: dict, pixels: list[Pixel] | None = None) -> list[dict]:

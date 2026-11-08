@@ -7,6 +7,7 @@ import json
 import logging
 import socket
 import time
+import uuid
 from pathlib import Path
 
 from app.discovery import normalize_mac
@@ -16,6 +17,7 @@ from app.mapper.advertise import MapperAdvertiser
 from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
 from app.mapper.ddp import DDP_PORT, encode_pixels, send_frame
+from app.mapper.detect_math import code_frames, ddp_index
 from app.mapper.effects import EFFECTS, effect_colors
 from app.mapper.export import pixelblaze_map, pixels_csv, pixels_json, xlights_xmodel
 from app.mapper.geom import normalise_points, vec3
@@ -66,6 +68,8 @@ class MapperService:
         self._frames = 0
         self._fps_mark = time.monotonic()
         self._advertiser = None
+        self._detect: dict | None = None
+        self._detect_hold = 180.0
         self.status: dict = {
             "running": False,
             "effect": None,
@@ -73,6 +77,7 @@ class MapperService:
             "frame": 0,
             "fps": 0.0,
             "highlight": None,
+            "detect": None,
             "error": None,
         }
 
@@ -307,8 +312,104 @@ class MapperService:
             return body, "application/xml", f"{filename}.xmodel"
         raise FleetError("Export format must be csv, json, pixelblaze, or xmodel.", 400)
 
+    async def begin_detect(self, fixture_id: str, run_id: object, mode: object) -> dict:
+        if mode not in {"binary", "sequential"}:
+            raise FleetError("Find mode must be binary or sequential.", 400)
+        if not isinstance(run_id, str) or not run_id:
+            raise FleetError("runId is required.", 400)
+        fixture = self._require(fixture_id)
+        run = _find_run(fixture, run_id)
+        pixels = [
+            pixel
+            for pixel in compile_fixture(fixture)
+            if pixel.controller == run.get("controllerId")
+            and pixel.output == int(run.get("outputIndex") or 0)
+            and pixel.segment in {segment.get("id") for segment in run.get("segments") or [] if isinstance(segment, dict)}
+        ]
+        indices = [pixel.index for pixel in pixels]
+        if not indices:
+            raise FleetError("That run has no pixels to find.", 400)
+        mac = self._mac(str(run.get("controllerId") or ""))
+        device = self.fleet.db.get_device(mac)
+        if device is None:
+            raise FleetError("Unknown controller.", 404)
+        try:
+            saved = await self.fleet.wled.get_json(device, "/json/state")
+        except WledError as exc:
+            raise FleetError(f"Could not read the controller before finding pixels. {exc}", 502) from exc
+        output = int(run.get("outputIndex") or 0)
+        output_start = bus_start(self.controllers(), mac, output) or 0
+        order = _order_for(self.controllers(), mac, output)
+        session = {
+            "id": str(uuid.uuid4()),
+            "fixtureId": fixture_id,
+            "runId": run_id,
+            "controller": mac,
+            "output": output,
+            "outputStart": output_start,
+            "channels": channels_for_order(order),
+            "mode": mode,
+            "indices": indices,
+            "frames": code_frames(indices, str(mode)),
+            "step": None,
+            "saved": saved,
+            "device": dict(device),
+            "ledCount": _output_count(self.controllers(), mac),
+            "expires": time.monotonic() + self._detect_hold,
+            "restored": False,
+        }
+        async with self._lock:
+            previous = self._detect
+            self._token += 1
+            self._effect = None
+            self._highlight = None
+            self._detect = session
+        if previous is not None:
+            await self._restore_detect(previous)
+        await self._publish_status(running=False, effect=None, fixture_id=fixture_id, highlight=None)
+        self._wake.set()
+        return _detect_document(session)
+
+    async def step_detect(self, fixture_id: str, session_id: str, step: object) -> dict:
+        async with self._lock:
+            session = self._detect
+            if session is None or session["id"] != session_id or session["fixtureId"] != fixture_id:
+                raise FleetError("That find has ended.", 404)
+            if isinstance(step, bool) or not isinstance(step, int) or not 0 <= step < len(session["frames"]):
+                raise FleetError("That frame is outside this find.", 400)
+            session["step"] = step
+            session["expires"] = time.monotonic() + self._detect_hold
+            self._token += 1
+            payload = _detect_job(session, self._token)
+            frame = dict(session["frames"][step])
+            view = _detect_document(session)
+        self._wake.set()
+        await self._send_detect_job(payload)
+        await self._publish_status(running=False, effect=None, fixture_id=fixture_id, highlight=None)
+        return {
+            "sessionId": session_id,
+            "step": frame["step"],
+            "role": frame["role"],
+            "bit": frame["bit"],
+            "lit": frame["lit"],
+            "frameCount": view["frameCount"],
+            "shown": True,
+        }
+
+    async def finish_detect(self, fixture_id: str, session_id: str) -> dict:
+        async with self._lock:
+            session = self._detect
+            if session is None or session["id"] != session_id or session["fixtureId"] != fixture_id:
+                return {"ok": True, "restored": False}
+            self._detect = None
+            self._token += 1
+        restored = await self._restore_detect(session)
+        await self._publish_status(running=False, effect=None, fixture_id=fixture_id, highlight=None)
+        return {"ok": True, "restored": restored}
+
     async def _loop(self) -> None:
         while not self._stop.is_set():
+            await self._expire_detect()
             job = await self._job()
             if job is None:
                 try:
@@ -332,6 +433,9 @@ class MapperService:
 
     async def _job(self) -> tuple[str, dict] | None:
         async with self._lock:
+            detect = self._detect
+            if detect is not None and detect.get("step") is not None:
+                return "detect", _detect_job(detect, self._token)
             if self._effect is not None:
                 return "effect", dict(self._effect)
             highlight = self._highlight
@@ -346,6 +450,8 @@ class MapperService:
         token = self._token
         if kind == "highlight":
             await self._send_highlight(payload, token)
+        elif kind == "detect":
+            await self._send_detect_job(payload)
         else:
             fixture = self.store.get(payload["fixtureId"])
             if fixture is None or token != self._token:
@@ -469,6 +575,7 @@ class MapperService:
             "frame": self.status["frame"] + 1,
             "fps": self.status["fps"] if fps is None else round(fps, 1),
             "highlight": highlight,
+            "detect": self._detect_view(),
             "error": None,
         }
         self._fanout()
@@ -477,6 +584,57 @@ class MapperService:
         self.status = dict(self.status)
         self.status["error"] = message
         self._fanout()
+
+    def _detect_view(self) -> dict | None:
+        session = self._detect
+        if session is None:
+            return None
+        step = session.get("step")
+        return {
+            "sessionId": session["id"],
+            "fixtureId": session["fixtureId"],
+            "runId": session["runId"],
+            "step": step,
+            "frameCount": len(session["frames"]),
+            "mode": session["mode"],
+        }
+
+    async def _expire_detect(self) -> None:
+        async with self._lock:
+            session = self._detect
+            if session is None or session["expires"] > time.monotonic():
+                return
+            self._detect = None
+            self._token += 1
+        await self._restore_detect(session)
+        await self._publish_status(running=False, effect=None, fixture_id=session["fixtureId"], highlight=None)
+
+    async def _restore_detect(self, session: dict) -> bool:
+        if session.get("restored"):
+            return True
+        session["restored"] = True
+        device = session.get("device")
+        saved = session.get("saved") if isinstance(session.get("saved"), dict) else {}
+        body = {key: saved[key] for key in ("on", "bri", "transition", "ps", "pl", "seg", "udpn") if key in saved}
+        if not isinstance(device, dict) or not body:
+            return False
+        try:
+            await self.fleet.wled.post_state(device, body)
+        except WledError:
+            log.warning("mapper could not restore %s", device.get("ip"), exc_info=True)
+            return False
+        return True
+
+    async def _send_detect_job(self, payload: dict) -> None:
+        colors = _detect_colors(payload)
+        channels = int(payload["channels"])
+        await self._send(
+            payload["controller"],
+            payload["ip"],
+            encode_pixels(colors, channels),
+            channels,
+            payload.get("token"),
+        )
 
     def _fanout(self) -> None:
         for queue in list(self._subscribers):
@@ -489,6 +647,65 @@ class MapperService:
                 queue.put_nowait(dict(self.status))
             except asyncio.QueueFull:
                 pass
+
+
+def _find_run(fixture: dict, run_id: str) -> dict:
+    for run in fixture.get("runs") or []:
+        if isinstance(run, dict) and run.get("id") == run_id:
+            return run
+    raise FleetError("Unknown run.", 404)
+
+
+def _detect_document(session: dict) -> dict:
+    return {
+        "sessionId": session["id"],
+        "runId": session["runId"],
+        "controllerId": session["controller"],
+        "outputIndex": session["output"],
+        "outputStart": session["outputStart"],
+        "mode": session["mode"],
+        "pixelCount": len(session["indices"]),
+        "indices": list(session["indices"]),
+        "frameCount": len(session["frames"]),
+        "frames": [
+            {"step": frame["step"], "role": frame["role"], "bit": frame["bit"], "lit": list(frame["lit"])}
+            for frame in session["frames"]
+        ],
+    }
+
+
+def _detect_job(session: dict, token: int) -> dict:
+    step = session.get("step")
+    frame = session["frames"][step] if isinstance(step, int) else {"lit": []}
+    device = session.get("device") if isinstance(session.get("device"), dict) else {}
+    return {
+        "token": token,
+        "fixtureId": session["fixtureId"],
+        "controller": session["controller"],
+        "ip": str(device.get("ip") or ""),
+        "channels": session["channels"],
+        "outputStart": session["outputStart"],
+        "ledCount": session["ledCount"],
+        "lit": list(frame.get("lit") or []),
+    }
+
+
+def _detect_colors(payload: dict) -> dict[int, tuple[int, int, int]]:
+    lit = [int(index) for index in payload.get("lit") or []]
+    output_start = int(payload.get("outputStart") or 0)
+    led_count = int(payload.get("ledCount") or 0)
+    absolute = [ddp_index(index, output_start) for index in lit]
+    span = led_count
+    if absolute:
+        span = max(span, max(absolute) + 1)
+    if span <= 0:
+        span = 1
+    span = min(span, 20_000)
+    colors = {index: (0, 0, 0) for index in range(span)}
+    for index in absolute:
+        if 0 <= index < 20_000:
+            colors[index] = (255, 255, 255)
+    return colors
 
 
 def _seconds(params: dict) -> float:

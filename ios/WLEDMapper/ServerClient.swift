@@ -5,6 +5,36 @@ struct Ack: Decodable {
     init(from decoder: Decoder) throws {}
 }
 
+struct DetectFrameInfo: Decodable {
+    var step: Int
+    var role: String
+    var bit: Int?
+    var lit: [Int]
+}
+
+struct DetectSession: Decodable {
+    var sessionId: String
+    var runId: String
+    var controllerId: String
+    var outputIndex: Int
+    var outputStart: Int
+    var mode: String
+    var pixelCount: Int
+    var indices: [Int]
+    var frameCount: Int
+    var frames: [DetectFrameInfo]
+}
+
+struct DetectStep: Decodable {
+    var sessionId: String
+    var step: Int
+    var role: String
+    var bit: Int?
+    var lit: [Int]
+    var frameCount: Int
+    var shown: Bool
+}
+
 struct ServerFailure: Error, LocalizedError {
     var message: String
     var status: Int = 0
@@ -94,6 +124,37 @@ final class ServerClient {
 
     func pixelmap(id: String) async throws -> [MappedPixel] {
         try await send(PixelMapDocument.self, path: "/api/mapper/fixtures/\(id)/pixelmap").pixels.map(\.mapped)
+    }
+
+    func beginDetect(fixture: String, runId: String, mode: String) async throws -> DetectSession {
+        struct Body: Encodable {
+            var runId: String
+            var mode: String
+        }
+        return try await send(
+            DetectSession.self,
+            path: "/api/mapper/fixtures/\(fixture)/detect",
+            method: "POST",
+            body: Body(runId: runId, mode: mode)
+        )
+    }
+
+    func stepDetect(fixture: String, session: String, step: Int) async throws -> DetectStep {
+        struct Body: Encodable { var step: Int }
+        return try await send(
+            DetectStep.self,
+            path: "/api/mapper/fixtures/\(fixture)/detect/\(session)",
+            method: "POST",
+            body: Body(step: step)
+        )
+    }
+
+    func finishDetect(fixture: String, session: String) async throws {
+        let _: Ack = try await send(
+            path: "/api/mapper/fixtures/\(fixture)/detect/\(session)/finish",
+            method: "POST",
+            body: [String: String]()
+        )
     }
 
     func highlight(fixture: String, controller: String, output: Int, index: Int) async throws {
