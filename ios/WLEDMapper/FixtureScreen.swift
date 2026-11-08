@@ -353,13 +353,10 @@ struct FixtureScreen: View {
                 .foregroundStyle(Theme.ink)
                 Button("Find pixels with the camera") {
                     more = false
-                    model.path.append(.detect(fixtureId))
+                    model.path.append(.find(fixtureId))
                 }
                 .font(.body.weight(.semibold))
                 .foregroundStyle(Theme.ink)
-                Text("Effects can light the whole fixture, one labelled branch, or a band around 1.4 m. The scope button next to the effects chooses which.")
-                    .font(.callout)
-                    .foregroundStyle(Theme.muted)
                 Text("A ledmap is only for a fixture on one controller. Upload reboots that board. Scaling the pitch, or setting a span's pixel count while capturing, fixes a count that does not match the board.")
                     .font(.callout)
                     .foregroundStyle(Theme.muted)
