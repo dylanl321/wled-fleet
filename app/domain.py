@@ -269,7 +269,8 @@ def build_span_state(
         "ix": 0,
         "frz": True,
         "col": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
-        "i": [light.start + start, light.start + stop, color],
+        # WLED's "i" indexes the segment's own buffer, so it counts from the segment start.
+        "i": [start, stop, color],
     }
     payload: dict = {"tt": 0, "seg": [segment]}
     if only:
@@ -475,50 +476,215 @@ def migration_plan(devices: list[dict], groups: list[dict], buses_by_mac: dict[s
 
 
 def sync_plan(existing: list[dict], buses: list[dict], device_name: str, led_count: int | None) -> dict:
-    """Update Lights from a board's outputs without dropping a named Light."""
+    """Update Lights from a board's outputs without dropping a named Light.
+
+    An output split by the segment finder holds several Lights. They are kept,
+    moved with the output if it moved, and clamped to its new end. If the
+    output shrank past a cut, the split collapses back into its first Light.
+    """
     usable = _buses_or_whole(buses, led_count)
-    by_output = {int(light["output_index"]): light for light in existing}
+    by_output: dict[int, list[dict]] = {}
+    for light in existing:
+        by_output.setdefault(int(light["output_index"]), []).append(light)
     upserts: list[dict] = []
+    delete_ids: list[int] = []
     for bus in usable:
-        previous = by_output.get(int(bus["index"]))
+        index = int(bus["index"])
         start = int(bus["start"])
         stop = start + int(bus["len"])
-        if previous is not None:
-            upserts.append(
-                {
-                    "id": previous["id"],
-                    "output_index": int(bus["index"]),
-                    "segment_id": int(bus["index"]),
-                    "start": start,
-                    "stop": stop,
-                    "name": previous["name"],
-                    "named": bool(previous["named"]),
-                    "zone_id": previous.get("zone_id"),
-                    "position": previous.get("position") or 0,
-                }
-            )
+        pieces = sorted(by_output.get(index, []), key=lambda light: (int(light["start"]), int(light["id"])))
+        if len(pieces) > 1:
+            shift = start - int(pieces[0]["start"])
+            bounds = [int(piece["start"]) + shift for piece in pieces[1:]]
+            if all(start < cut < stop for cut in bounds):
+                edges = [start, *bounds, stop]
+                for piece, low, high in zip(pieces, edges, edges[1:]):
+                    upserts.append(_keep(piece, index, int(piece["segment_id"]), low, high))
+                continue
+            delete_ids.extend(int(piece["id"]) for piece in pieces[1:])
+            pieces = pieces[:1]
+        if pieces:
+            upserts.append(_keep(pieces[0], index, index if len(by_output.get(index, [])) <= 1 else int(pieces[0]["segment_id"]), start, stop))
             continue
         label = device_name if len(usable) == 1 else f"{device_name} {bus['index'] + 1}"
         upserts.append(
             {
                 "id": None,
-                "output_index": int(bus["index"]),
-                "segment_id": int(bus["index"]),
+                "output_index": index,
+                "segment_id": index,
                 "start": start,
                 "stop": stop,
                 "name": label[:32],
                 "named": False,
                 "zone_id": existing[0].get("zone_id") if existing else None,
-                "position": int(bus["index"]),
+                "position": index,
             }
         )
     keep = {int(bus["index"]) for bus in usable}
-    delete_ids = [
+    delete_ids.extend(
         int(light["id"])
         for light in existing
         if int(light["output_index"]) not in keep and not light.get("named")
-    ]
+    )
     return {"upserts": upserts, "delete_ids": delete_ids}
+
+
+def _keep(light: dict, output_index: int, segment_id: int, start: int, stop: int) -> dict:
+    return {
+        "id": light["id"],
+        "output_index": output_index,
+        "segment_id": segment_id,
+        "start": start,
+        "stop": stop,
+        "name": light["name"],
+        "named": bool(light["named"]),
+        "zone_id": light.get("zone_id"),
+        "position": light.get("position") or 0,
+    }
+
+
+# ----- segment finder ----------------------------------------------------------
+
+# Distinct, easy-to-tell-apart colors for the pieces of a split output.
+PIECE_COLORS = ["FF3B30", "34C759", "0A84FF", "FFD60A", "BF5AF2", "64D2FF", "FF9F0A", "FFFFFF"]
+MARKER_COLOR = "FFFFFF"
+
+
+@dataclass(frozen=True)
+class Piece:
+    start: int
+    stop: int
+    segment_id: int
+    light_id: int | None
+
+
+def clean_cuts(cuts: list[int], start: int, stop: int) -> list[int]:
+    """Cuts are absolute LED indexes where a new piece begins. Each piece keeps at least one LED."""
+    return sorted({int(cut) for cut in cuts if start < int(cut) < stop})
+
+
+def plan_split(
+    pieces: list[dict],
+    start: int,
+    stop: int,
+    cuts: list[int],
+    taken_ids: set[int],
+    max_segments: int,
+) -> tuple[list[Piece], list[dict]]:
+    """Map cut points onto Lights and WLED segment ids.
+
+    Existing Lights of the output are reused in order, so the first piece keeps
+    the output's name, zone and segment. New pieces take the lowest segment ids
+    not used anywhere on the board. Returns the pieces and the Lights left over.
+    """
+    edges = [start, *clean_cuts(cuts, start, stop), stop]
+    ordered = sorted(pieces, key=lambda light: (int(light["start"]), int(light["id"])))
+    free = (candidate for candidate in range(max(1, max_segments)) if candidate not in taken_ids)
+    planned: list[Piece] = []
+    for index, (low, high) in enumerate(zip(edges, edges[1:])):
+        if index < len(ordered):
+            reused = ordered[index]
+            planned.append(Piece(low, high, int(reused["segment_id"]), int(reused["id"])))
+            continue
+        segment_id = next(free, None)
+        if segment_id is None:
+            raise ValueError(f"This board allows {max_segments} segments. Use fewer cuts.")
+        planned.append(Piece(low, high, segment_id, None))
+    return planned, ordered[len(planned):]
+
+
+def build_split_state(pieces: list[Piece], removed_segment_ids: list[int], template: dict | None = None) -> dict:
+    """Segments for the pieces, with deletions. New pieces copy the look of the output's first segment."""
+    look = {key: template[key] for key in ("on", "bri", "col", "fx", "pal", "sx", "ix") if template and key in template}
+    segments: list[dict] = []
+    for piece in pieces:
+        segment = {"id": piece.segment_id, "start": piece.start, "stop": max(piece.start + 1, piece.stop), "frz": False}
+        if piece.light_id is None:
+            segment.update(look)
+            segment.setdefault("on", True)
+        segments.append(segment)
+    for segment_id in removed_segment_ids:
+        # WLED deletes a segment whose stop is not after its start; 0 is the documented way.
+        segments.append({"id": segment_id, "stop": 0})
+    return {"tt": 0, "seg": segments}
+
+
+def build_marks_state(
+    segments: list[dict],
+    marks: list[tuple[int, int, str]],
+    *,
+    base: str = "000000",
+) -> dict:
+    """Paint absolute LED ranges onto whatever segments currently cover them.
+
+    Used by the ruler and the segment finder, which preview pieces that do not
+    exist on the board yet. Each segment is frozen at its own bounds and painted
+    with segment-relative "i" ranges, so the board's layout is never changed.
+    """
+    painted: list[dict] = []
+    for segment in segments:
+        low = int(segment["start"])
+        high = int(segment["stop"])
+        if high <= low:
+            continue
+        ranges: list[object] = [0, high - low, base]
+        for start, stop, color in marks:
+            overlap_low = max(low, int(start))
+            overlap_high = min(high, int(stop))
+            if overlap_high > overlap_low:
+                ranges.extend([overlap_low - low, overlap_high - low, color])
+        painted.append(
+            {
+                "id": int(segment["id"]),
+                "start": low,
+                "stop": high,
+                "on": True,
+                "bri": 255,
+                "fx": 0,
+                "frz": True,
+                "col": [[0, 0, 0], [0, 0, 0], [0, 0, 0]],
+                "i": ranges,
+            }
+        )
+    return {"tt": 0, "on": True, "bri": 255, "seg": painted}
+
+
+def finder_marks(start: int, stop: int, cuts: list[int], marker: int | None) -> list[tuple[int, int, str]]:
+    """Each proposed piece dimly in its own color, cut points and the marker bright."""
+    edges = [start, *clean_cuts(cuts, start, stop), stop]
+    marks: list[tuple[int, int, str]] = []
+    for index, (low, high) in enumerate(zip(edges, edges[1:])):
+        marks.append((low, high, _dim(PIECE_COLORS[index % len(PIECE_COLORS)], 0.28)))
+        marks.append((low, low + 1, PIECE_COLORS[index % len(PIECE_COLORS)]))
+    if marker is not None and start <= marker < stop:
+        marks.append((marker, marker + 1, MARKER_COLOR))
+    return marks
+
+
+def _dim(color: str, amount: float) -> str:
+    channels = [int(color[i : i + 2], 16) for i in (0, 2, 4)]
+    return "".join(f"{max(0, min(255, round(channel * amount))):02X}" for channel in channels)
+
+
+def heal_state(lights: list[dict], state: dict) -> dict | None:
+    """Segments the server holds for a split board that the board no longer has (after a reboot)."""
+    by_output: dict[int, int] = {}
+    for light in lights:
+        by_output[int(light["output_index"])] = by_output.get(int(light["output_index"]), 0) + 1
+    if not any(count > 1 for count in by_output.values()):
+        return None
+    present = {}
+    for segment in state.get("seg") or []:
+        if isinstance(segment, dict) and isinstance(segment.get("id"), int):
+            present[segment["id"]] = (segment.get("start"), segment.get("stop"))
+    wanted = []
+    for light in lights:
+        bounds = (int(light["start"]), int(light["stop"]))
+        if present.get(int(light["segment_id"])) != bounds:
+            wanted.append({"id": int(light["segment_id"]), "start": bounds[0], "stop": bounds[1], "on": True})
+    if not wanted:
+        return None
+    return {"tt": 0, "seg": wanted}
 
 
 def preview_interval(light_count: int) -> float:

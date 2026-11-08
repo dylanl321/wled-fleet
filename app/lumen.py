@@ -21,10 +21,15 @@ from app.domain import (
     COMMIT_MS,
     LightRef,
     PlannedLight,
-    build_span_state,
+    build_marks_state,
+    build_split_state,
     build_targeted_state,
+    clean_cuts,
     effective_brightness,
+    finder_marks,
+    heal_state,
     migration_plan,
+    plan_split,
     resolve_look,
     sync_plan,
 )
@@ -87,9 +92,22 @@ class LengthIn(BaseModel):
 
 class ClaimIn(BaseModel):
     output: int = Field(ge=0, le=32)
+    light_id: int | None = None
     name: str = Field(min_length=1, max_length=32)
     zone_id: int | None = None
     zone_name: str | None = Field(default=None, max_length=32)
+
+
+class SplitPreviewIn(BaseModel):
+    output: int = Field(ge=0, le=32)
+    cuts: list[int] = Field(default_factory=list, max_length=31)
+    marker: int | None = Field(default=None, ge=0, le=8192)
+
+
+class SplitIn(BaseModel):
+    output: int = Field(ge=0, le=32)
+    cuts: list[int] = Field(default_factory=list, max_length=31)
+    names: list[str] = Field(default_factory=list, max_length=32)
 
 
 class LookSaveIn(BaseModel):
@@ -121,6 +139,8 @@ class Lumen:
         self._stop = asyncio.Event()
         self._flash: dict[str, asyncio.Task] = {}
         self._saved_flash: dict[str, dict] = {}
+        self._saved_split: dict[str, dict] = {}
+        self._healed: dict[str, float] = {}
 
     async def run(self) -> None:
         await asyncio.to_thread(self.prepare)
@@ -286,6 +306,7 @@ class Lumen:
     def ingest_state(self, mac: str, state: dict) -> None:
         if not isinstance(state, dict):
             return
+        self._heal(mac, state)
         master_on = bool(state.get("on"))
         master_bri = state.get("bri") if isinstance(state.get("bri"), int) else 0
         raw_segments = state.get("seg") if isinstance(state.get("seg"), list) else []
@@ -526,24 +547,167 @@ class Lumen:
 
     async def span(self, mac: str, body: SpanIn) -> dict:
         device = self.fleet._require(mac)
-        refs = self._refs(mac)
-        lights = self.db.lights_for_mac(mac)
-        match = next((light for light in lights if int(light["output_index"]) == body.output), None)
-        if match is None:
-            raise FleetError("That output is not on this board.", 404)
-        target = next(light for light in refs if light.id == int(match["id"]))
-        others = [light for light in refs if light.id != target.id]
-        payload = build_span_state(target, body.start, body.stop, others, only=body.only)
+        pieces = self._output_lights(mac, body.output)
+        start = int(pieces[0]["start"])
+        stop = int(pieces[-1]["stop"])
+        low = start + max(0, min(body.start, body.stop))
+        high = min(stop, start + max(body.start, body.stop))
+        payload = build_marks_state([self._segment_of(piece) for piece in pieces], [(low, max(low + 1, high), "FFE7B0")])
+        if body.only:
+            others = [light for light in self.db.lights_for_mac(mac) if int(light["output_index"]) != body.output]
+            payload["seg"].extend({"id": int(light["segment_id"]), "on": False} for light in others)
         self.hub.submit(mac, device.get("arch"), "commit", payload)
         return {"ok": True, "count": abs(body.stop - body.start)}
+
+    # ----- segment finder ---------------------------------------------------
+
+    def _output_lights(self, mac: str, output: int) -> list[dict]:
+        pieces = sorted(
+            (light for light in self.db.lights_for_mac(mac) if int(light["output_index"]) == output),
+            key=lambda light: (int(light["start"]), int(light["id"])),
+        )
+        if not pieces:
+            raise FleetError("That output is not on this board.", 404)
+        return pieces
+
+    @staticmethod
+    def _segment_of(light: dict) -> dict:
+        return {"id": int(light["segment_id"]), "start": int(light["start"]), "stop": int(light["stop"])}
+
+    def _max_segments(self, device: dict) -> int:
+        try:
+            info = json.loads(device.get("info_json") or "{}")
+            value = info.get("leds", {}).get("maxseg")
+        except (ValueError, AttributeError):
+            value = None
+        return int(value) if isinstance(value, int) and value > 0 else 16
+
+    async def _hold_for_finder(self, mac: str, device: dict) -> None:
+        if mac in self._saved_split:
+            return
+        try:
+            self._saved_split[mac] = await self.fleet.wled.get_json(device, "/json/state", timeout=2.5)
+        except WledError as exc:
+            raise FleetError(str(exc)) from exc
+
+    def _restore_segments(self, mac: str) -> dict | None:
+        saved = self._saved_split.pop(mac, None)
+        if not saved:
+            return None
+        body = {"tt": 0, **_restore_body(saved)}
+        body["seg"] = [{**segment, "frz": False} for segment in body.get("seg") or [] if isinstance(segment, dict)]
+        return body
+
+    async def split_preview(self, mac: str, body: SplitPreviewIn) -> dict:
+        """Show the proposed pieces and the marker on the real strip without changing its segments."""
+        device = self.fleet._require(mac)
+        pieces = self._output_lights(mac, body.output)
+        start = int(pieces[0]["start"])
+        stop = int(pieces[-1]["stop"])
+        await self._hold_for_finder(mac, device)
+        cuts = [start + int(cut) for cut in body.cuts]
+        marker = start + body.marker if body.marker is not None else None
+        payload = build_marks_state([self._segment_of(piece) for piece in pieces], finder_marks(start, stop, cuts, marker))
+        self.hub.submit(mac, device.get("arch"), "preview", payload)
+        return {"ok": True, "pieces": len(clean_cuts(cuts, start, stop)) + 1}
+
+    async def split_cancel(self, mac: str) -> dict:
+        device = self.fleet._require(mac)
+        restore = self._restore_segments(mac)
+        if restore:
+            self.hub.submit(mac, device.get("arch"), "commit", restore)
+        return {"ok": True}
+
+    async def split(self, mac: str, body: SplitIn) -> dict:
+        """Cut one output into several Lights, or merge it back with no cuts."""
+        device = self.fleet._require(mac)
+        pieces = self._output_lights(mac, body.output)
+        start = int(pieces[0]["start"])
+        stop = int(pieces[-1]["stop"])
+        cuts = clean_cuts([start + int(cut) for cut in body.cuts], start, stop)
+        board_lights = self.db.lights_for_mac(mac)
+        output_ids = {int(piece["id"]) for piece in pieces}
+        saved = self._saved_split.get(mac) or {}
+        taken = {int(light["segment_id"]) for light in board_lights if int(light["id"]) not in output_ids}
+        taken |= {int(piece["segment_id"]) for piece in pieces}
+        taken |= {
+            int(segment["id"])
+            for segment in saved.get("seg") or []
+            if isinstance(segment, dict) and isinstance(segment.get("id"), int)
+            and not any(int(segment["id"]) == int(piece["segment_id"]) for piece in pieces)
+        }
+        try:
+            planned, leftover = plan_split(pieces, start, stop, cuts, taken, self._max_segments(device))
+        except ValueError as exc:
+            raise FleetError(str(exc)) from exc
+        template = None
+        for segment in saved.get("seg") or []:
+            if isinstance(segment, dict) and segment.get("id") == int(pieces[0]["segment_id"]):
+                template = segment
+        payload = build_split_state(planned, [int(light["segment_id"]) for light in leftover], template)
+        restore = self._restore_segments(mac)
+        if restore:
+            # One write: the board's look comes back and the new layout lands together.
+            merged: dict[int, dict] = {int(segment["id"]): segment for segment in restore["seg"] if isinstance(segment.get("id"), int)}
+            for segment in payload["seg"]:
+                merged[int(segment["id"])] = {**merged.get(int(segment["id"]), {}), **segment}
+            payload = {**restore, "seg": list(merged.values())}
+        self.hub.submit(mac, device.get("arch"), "commit", payload)
+
+        base = pieces[0]
+        names = [clean_name(name) for name in body.names]
+        for index, piece in enumerate(planned):
+            name = names[index] if index < len(names) and names[index] else None
+            if piece.light_id is not None:
+                fields: dict = {"start": piece.start, "stop": piece.stop, "segment_id": piece.segment_id}
+                if name:
+                    fields["name"] = name
+                self.db.update_light(piece.light_id, fields)
+                continue
+            self.db.insert_light(
+                {
+                    "mac": mac,
+                    "segment_id": piece.segment_id,
+                    "output_index": int(body.output),
+                    "name": (name or f"{base['name']} {index + 1}")[:32],
+                    "zone_id": base.get("zone_id"),
+                    "position": int(base.get("position") or 0) + index,
+                    "named": bool(base.get("named")),
+                    "start": piece.start,
+                    "stop": piece.stop,
+                }
+            )
+        for light in leftover:
+            self.db.delete_light(int(light["id"]))
+            self.runtime.pop(int(light["id"]), None)
+        self.db.delete_empty_zones()
+        result = self.home()
+        result["split"] = [{"start": piece.start - start, "stop": piece.stop - start, "segment_id": piece.segment_id} for piece in planned]
+        return result
+
+    def _heal(self, mac: str, state: dict) -> None:
+        """Put back segments a split board lost, e.g. after it rebooted without a boot preset."""
+        if mac in self._saved_split:
+            return
+        payload = heal_state(self.db.lights_for_mac(mac), state)
+        if payload is None:
+            return
+        now = time.monotonic()
+        if now - self._healed.get(mac, 0.0) < 10:
+            return
+        self._healed[mac] = now
+        device = self.db.get_device(mac)
+        if device is None:
+            return
+        log.info("restoring %s segment(s) on %s", len(payload["seg"]), device.get("name"))
+        self.hub.submit(mac, device.get("arch"), "commit", payload)
 
     async def light_only(self, mac: str, output: int) -> dict:
         device = self.fleet._require(mac)
         lights = self.db.lights_for_mac(mac)
-        match = next((light for light in lights if int(light["output_index"]) == output), None)
-        if match is None:
+        selected = {int(light["id"]) for light in lights if int(light["output_index"]) == output}
+        if not selected:
             raise FleetError("That output is not on this board.", 404)
-        selected = {int(match["id"])}
         # Address every output: the chosen one on, the others off, master on.
         refs = self._refs(mac)
         segments = []
@@ -589,7 +753,10 @@ class Lumen:
     async def claim(self, mac: str, body: ClaimIn) -> dict:
         self.fleet._require(mac)
         lights = self.db.lights_for_mac(mac)
-        match = next((light for light in lights if int(light["output_index"]) == body.output), None)
+        if body.light_id is not None:
+            match = next((light for light in lights if int(light["id"]) == body.light_id), None)
+        else:
+            match = next((light for light in lights if int(light["output_index"]) == body.output), None)
         if match is None:
             raise FleetError("That output is not on this board.", 404)
         zone_id = body.zone_id
@@ -1043,6 +1210,18 @@ def mount_lumen(app: FastAPI) -> None:
     @app.post("/api/lumen/find/{mac}/length")
     async def length(mac: str, body: LengthIn, request: Request) -> dict:
         return await lumen_of(request).set_length(mac_of(request, mac), body)
+
+    @app.post("/api/lumen/find/{mac}/split/preview")
+    async def split_preview(mac: str, body: SplitPreviewIn, request: Request) -> dict:
+        return await lumen_of(request).split_preview(mac_of(request, mac), body)
+
+    @app.post("/api/lumen/find/{mac}/split/cancel")
+    async def split_cancel(mac: str, request: Request) -> dict:
+        return await lumen_of(request).split_cancel(mac_of(request, mac))
+
+    @app.post("/api/lumen/find/{mac}/split")
+    async def split(mac: str, body: SplitIn, request: Request) -> dict:
+        return await lumen_of(request).split(mac_of(request, mac), body)
 
     @app.post("/api/lumen/find/{mac}/flash")
     async def flash(mac: str, request: Request) -> dict:

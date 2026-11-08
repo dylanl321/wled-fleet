@@ -2,7 +2,7 @@
 
 WLED Fleet keeps a house full of [WLED](https://kno.wled.ge) controllers backed up and reachable from a phone. It runs unattended on the LAN, finds controllers by itself, stores their config and presets, and flashes firmware only when you tell it to.
 
-The phone UI is Lumen. Home is a list of live ribbons, one per light, grouped into zones. Tap a ribbon and Paint opens over it: a tray of Looks you can scrub onto the real strips, plus brightness. Find counts LEDs on a ruler. Maintenance is the only place a board shows up. There is no tab bar.
+The phone UI is Lumen. Home is a list of live ribbons, one per light, grouped into zones. Tap a ribbon and Paint opens over it: a tray of Looks you can scrub onto the real strips, plus brightness. Find counts LEDs on a ruler and splits one output into several lights. Maintenance is the only place a board shows up; tap the top line of Home to open it. There is no tab bar.
 
 A preview image is published from the `lumen` branch as `ghcr.io/dylanl321/wled-fleet:lumen`. It does not move `:latest`. On TrueNAS, change the image tag to `lumen` to try it, and leave the data volume where it is. Existing controllers and backups are kept; groups become zones and each output becomes a light.
 
@@ -13,6 +13,18 @@ A preview image is published from the `lumen` branch as `ghcr.io/dylanl321/wled-
 - Lets you restore a chosen backup (current config is saved first), or download the files as a zip.
 - From the phone: on/off, brightness, color, presets, segments, LED lengths, rename, identify, reboot. Wi-Fi and the access point are shown and are not editable.
 - Firmware is per device or per profile (Dig-Uno ESP32, Dig-Uno ESP8266, Dig-Quad, generic ESP32, generic ESP8266). You can upload a `.bin` or pull one from the QuinLED or official WLED GitHub releases. The image header and the file name have to match the controller's chip, and a Dig-Uno file will not be offered to a Dig-Quad. A backup runs first. Nothing flashes on a schedule.
+
+## Splitting an output into lights
+
+One output often drives runs you think of separately: the top and bottom of a shelf, two sides of a porch rail. In Find, tap **Split into segments** on that output.
+
+1. Drag along the bar, or use −10, −1, +1, +10, to walk a white LED along the real strip.
+2. Stop on the first LED of the next run and tap **Cut before LED n**. Each piece lights up on the strip in its own color, so you can see where every piece starts and ends.
+3. Name the pieces and tap **Save**. Each piece becomes a WLED segment and a light on Home, with its own Looks, brightness, and zone.
+
+**Change segments** reopens the finder for that output; **Merge into one light** puts it back. Cancel, or leaving Find, restores the strip exactly as it was.
+
+WLED forgets segments on reboot unless they are saved in a boot preset. The server keeps the split instead, and rewrites the segments whenever a board comes back without them, so you never touch presets.
 
 ## Run the demo
 

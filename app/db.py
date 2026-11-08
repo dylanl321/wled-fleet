@@ -133,7 +133,7 @@ CREATE TABLE IF NOT EXISTS lights (
   start INTEGER NOT NULL DEFAULT 0,
   stop INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL,
-  UNIQUE (mac, output_index)
+  UNIQUE (mac, segment_id)
 );
 
 CREATE TABLE IF NOT EXISTS looks (
@@ -166,7 +166,23 @@ class Database:
             self._conn.execute("PRAGMA synchronous=NORMAL")
             self._conn.execute("PRAGMA foreign_keys=ON")
             self._conn.executescript(SCHEMA)
+            self._split_outputs()
             self._conn.commit()
+
+    def _split_outputs(self) -> None:
+        """Let one output hold several Lights: a Light is unique by segment, not by output.
+
+        The first Lumen schema keyed lights on (mac, output_index). SQLite cannot drop
+        a table constraint, so the table is rebuilt once with the same rows and ids.
+        """
+        row = self._conn.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='lights'").fetchone()
+        if row is None or "UNIQUE (mac, output_index)" not in (row[0] or ""):
+            return
+        columns = "id, mac, segment_id, output_index, name, zone_id, position, named, start, stop, created_at"
+        self._conn.execute("ALTER TABLE lights RENAME TO lights_by_output")
+        self._conn.executescript(SCHEMA)
+        self._conn.execute(f"INSERT INTO lights ({columns}) SELECT {columns} FROM lights_by_output")
+        self._conn.execute("DROP TABLE lights_by_output")
 
     def close(self) -> None:
         with self._lock:

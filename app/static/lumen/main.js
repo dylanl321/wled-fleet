@@ -35,6 +35,7 @@ const state = {
   flow: {},
   identify: {},
   ruler: {},
+  finder: null,
   zonePick: {},
   confirm: null,
   dragging: false,
@@ -253,6 +254,7 @@ function signature() {
     state.maint ? 1 : 0,
     JSON.stringify(state.zonePick),
     JSON.stringify(state.ruler),
+    state.finder ? `${state.finder.mac}/${state.finder.output}/${state.finder.cuts.join(",")}/${state.finder.saving ? 1 : 0}` : "",
   ].join("~");
 }
 
@@ -356,14 +358,180 @@ function findView() {
   const outputs = allLights().filter((light) => light.mac === mac);
   const board = outputs[0]?.board || {};
   const head = `<button class="back" data-back>Back</button><header class="board-head"><h1>${escapeHtml(board.name || "Board")}</h1><p class="meta">${escapeHtml(board.ip || "")} · ${escapeHtml(board.version || "")} · ${escapeHtml(board.chip || "")}</p><button class="flash" data-flash data-on="false">Flash</button></header>`;
-  return head + outputs.map(outputCard).join("");
+  const byOutput = new Map();
+  for (const light of outputs) {
+    if (!byOutput.has(light.output_index)) byOutput.set(light.output_index, []);
+    byOutput.get(light.output_index).push(light);
+  }
+  const cards = [...byOutput.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([output, pieces]) => outputCard(output, pieces.sort((a, b) => a.start - b.start)));
+  return head + cards.join("");
 }
 
-function outputCard(light) {
-  const ruler = state.ruler[light.id] || {};
+function outputBounds(pieces) {
+  const start = Math.min(...pieces.map((piece) => piece.start));
+  const stop = Math.max(...pieces.map((piece) => piece.stop));
+  return { start, stop, length: Math.max(1, stop - start) };
+}
+
+function outputCard(output, pieces) {
+  const first = pieces[0];
+  const { start, stop, length } = outputBounds(pieces);
+  const ruler = state.ruler[first.id] || {};
   const count = ruler.a == null ? "" : Math.abs((ruler.b ?? ruler.a + 25) - ruler.a);
-  const length = light.length || light.stop - light.start || 0;
-  return `<article data-output="${light.output_index}">${lightRow(light)}<div class="ruler" data-ruler="${light.id}">${ticks(length)}</div><p class="span-count" data-span-count>${count === "" ? "" : count}</p><div class="actions"><button class="text-btn" data-only="${light.output_index}">Light only this output</button><button class="text-btn" data-set-length="${light.output_index}">Set length</button></div><form class="field" data-claim="${light.output_index}"><input data-output-name placeholder="Name" value="${escapeHtml((state.names && state.names[light.output_index]) || (light.named ? light.name : ""))}" aria-label="Light name"><div class="zones-row">${(state.home?.zones || []).map((zone) => `<button type="button" class="chip${state.zonePick[light.id] === zone.id ? " is-on" : ""}" data-zone-choice="${zone.id}">${escapeHtml(zone.name)}</button>`).join("")}<button type="button" class="chip" data-zone-new="${light.id}">New zone</button></div>${state.zonePick[light.id] === "new" ? `<input data-new-zone placeholder="Zone name" aria-label="Zone name">` : ""}<button class="text-btn" type="submit">Done</button></form></article>`;
+  const finding = state.finder && state.finder.mac === first.mac && state.finder.output === output;
+  const title = `<h2 class="output-title">Output ${output + 1}<span>LEDs ${start}–${stop}${pieces.length > 1 ? ` · ${pieces.length} lights` : ""}</span></h2>`;
+  const rows = pieces.map(lightRow).join("");
+  const naming = pieces.map((piece) => claimForm(output, piece, pieces.length > 1)).join("");
+  if (finding) return `<article class="output" data-output="${output}">${title}${rows}${finderPanel(output, pieces)}</article>`;
+  return `<article class="output" data-output="${output}">${title}${rows}<div class="ruler" data-ruler="${first.id}">${ticks(length)}</div><p class="span-count" data-span-count>${count === "" ? "" : count}</p><div class="actions"><button class="text-btn" data-only="${output}">Light only this output</button><button class="text-btn" data-set-length="${output}">Set length</button><button class="text-btn" data-finder-open="${output}">${pieces.length > 1 ? "Change segments" : "Split into segments"}</button></div>${naming}</article>`;
+}
+
+function claimForm(output, light, split) {
+  const key = split ? `l${light.id}` : output;
+  const typed = state.names && state.names[key];
+  const label = split ? `<p class="piece-label">LEDs ${light.start}–${light.stop}</p>` : "";
+  return `<form class="field" data-claim="${output}" data-claim-light="${light.id}" data-name-key="${key}">${label}<input data-output-name placeholder="Name" value="${escapeHtml(typed || (light.named ? light.name : ""))}" aria-label="Light name"><div class="zones-row">${(state.home?.zones || []).map((zone) => `<button type="button" class="chip${state.zonePick[light.id] === zone.id ? " is-on" : ""}" data-zone-choice="${zone.id}">${escapeHtml(zone.name)}</button>`).join("")}<button type="button" class="chip" data-zone-new="${light.id}">New zone</button></div>${state.zonePick[light.id] === "new" ? `<input data-new-zone placeholder="Zone name" aria-label="Zone name">` : ""}<button class="text-btn" type="submit">Done</button></form>`;
+}
+
+// ----- segment finder ---------------------------------------------------------
+
+// Same order as PIECE_COLORS on the server, so the screen matches the strip.
+const PIECE_COLORS = ["#FF3B30", "#34C759", "#0A84FF", "#FFD60A", "#BF5AF2", "#64D2FF", "#FF9F0A", "#FFFFFF"];
+
+function finderPieces(finder) {
+  const edges = [0, ...finder.cuts, finder.length];
+  return edges.slice(0, -1).map((low, index) => ({ start: low, stop: edges[index + 1], color: PIECE_COLORS[index % PIECE_COLORS.length] }));
+}
+
+function finderPanel(output, pieces) {
+  const finder = state.finder;
+  const parts = finderPieces(finder);
+  const bands = parts
+    .map((part) => `<span class="finder-band" style="left:${(part.start / finder.length) * 100}%;width:${((part.stop - part.start) / finder.length) * 100}%;background:${part.color}"></span>`)
+    .join("");
+  const cuts = finder.cuts.map((cut) => `<span class="finder-cut" style="left:${(cut / finder.length) * 100}%"></span>`).join("");
+  const list = parts
+    .map((part, index) => {
+      const name = finder.names[index] ?? "";
+      const remove = index > 0 ? `<button type="button" class="finder-uncut" data-uncut="${part.start}" aria-label="Remove the cut at LED ${part.start}">×</button>` : "";
+      return `<li><i style="background:${part.color}"></i><div><input data-piece-name="${index}" value="${escapeHtml(name)}" placeholder="${escapeHtml(pieceName(pieces[0], index))}" aria-label="Name for LEDs ${part.start} to ${part.stop}"><span>LEDs ${part.start}–${part.stop - 1} · ${part.stop - part.start}</span></div>${remove}</li>`;
+    })
+    .join("");
+  const merge = pieces.length > 1 ? `<button class="text-btn" data-split-merge>Merge into one light</button>` : "";
+  const save = parts.length > 1 ? `Save ${parts.length} lights` : pieces.length > 1 ? "Save as one light" : "Done";
+  return `<section class="finder" data-finder>
+<p class="finder-hint">Move the white LED to the first LED of the next run, then cut. The strip shows each piece in its color.</p>
+<div class="finder-bar" data-finder-bar>${bands}${cuts}<span class="finder-marker" data-finder-marker style="left:${((finder.marker + 0.5) / finder.length) * 100}%"></span></div>
+<p class="finder-led">LED <b data-marker-readout>${finder.marker}</b> <span>of ${finder.length}</span></p>
+<div class="finder-steps"><button type="button" data-step="-10">−10</button><button type="button" data-step="-1">−1</button><button type="button" data-step="1">+1</button><button type="button" data-step="10">+10</button></div>
+<button class="finder-cut-btn" data-cut ${finder.marker === 0 || finder.cuts.includes(finder.marker) ? "disabled" : ""}>Cut before LED <span data-cut-at>${finder.marker}</span></button>
+<ol class="finder-pieces">${list}</ol>
+<div class="actions"><button class="text-btn finder-save" data-split-save ${finder.saving ? "disabled" : ""}>${save}</button><button class="text-btn" data-split-cancel>Cancel</button>${merge}</div>
+</section>`;
+}
+
+function pieceName(first, index) {
+  const base = first?.name || "Light";
+  return index === 0 ? base : `${base} ${index + 1}`;
+}
+
+function openFinder(output) {
+  const pieces = allLights().filter((light) => light.mac === state.findMac && light.output_index === output).sort((a, b) => a.start - b.start);
+  if (!pieces.length) return;
+  const { start, length } = outputBounds(pieces);
+  state.finder = {
+    mac: state.findMac,
+    output,
+    length,
+    marker: 0,
+    cuts: pieces.slice(1).map((piece) => piece.start - start),
+    names: pieces.map((piece) => (piece.named ? piece.name : "")),
+    saving: false,
+  };
+  scheduleRender();
+  sendFinderPreview(true);
+}
+
+let finderTimer = 0;
+let finderSentAt = 0;
+function sendFinderPreview(now) {
+  const finder = state.finder;
+  if (!finder) return;
+  window.clearTimeout(finderTimer);
+  const wait = now ? 0 : Math.max(0, 90 - (performance.now() - finderSentAt));
+  finderTimer = window.setTimeout(() => {
+    finderSentAt = performance.now();
+    api(`/api/lumen/find/${finder.mac}/split/preview`, { output: finder.output, cuts: finder.cuts, marker: finder.marker }).catch(() => {});
+  }, wait);
+}
+
+function moveMarker(led) {
+  const finder = state.finder;
+  if (!finder) return;
+  const next = Math.max(0, Math.min(finder.length - 1, Math.round(led)));
+  if (next === finder.marker) return;
+  finder.marker = next;
+  haptic(finder.cuts.includes(next) ? "medium" : "light");
+  const marker = document.querySelector("[data-finder-marker]");
+  if (marker) marker.style.left = `${((next + 0.5) / finder.length) * 100}%`;
+  const readout = document.querySelector("[data-marker-readout]");
+  if (readout) readout.textContent = String(next);
+  const cutAt = document.querySelector("[data-cut-at]");
+  if (cutAt) cutAt.textContent = String(next);
+  const cut = document.querySelector("[data-cut]");
+  if (cut) cut.disabled = next === 0 || finder.cuts.includes(next);
+  sendFinderPreview(false);
+}
+
+function addCut() {
+  const finder = state.finder;
+  if (!finder || finder.marker === 0 || finder.cuts.includes(finder.marker)) return;
+  const index = finder.cuts.filter((cut) => cut < finder.marker).length + 1;
+  finder.cuts = [...finder.cuts, finder.marker].sort((a, b) => a - b);
+  finder.names.splice(index, 0, "");
+  haptic("medium");
+  scheduleRender();
+  sendFinderPreview(true);
+}
+
+function removeCut(led) {
+  const finder = state.finder;
+  if (!finder) return;
+  const index = finder.cuts.indexOf(led);
+  if (index < 0) return;
+  finder.cuts.splice(index, 1);
+  finder.names.splice(index + 1, 1);
+  scheduleRender();
+  sendFinderPreview(true);
+}
+
+async function closeFinder(save, merge) {
+  const finder = state.finder;
+  if (!finder) return;
+  if (!save) {
+    state.finder = null;
+    scheduleRender();
+    await api(`/api/lumen/find/${finder.mac}/split/cancel`, {}).catch(() => {});
+    return;
+  }
+  finder.saving = true;
+  scheduleRender();
+  const cuts = merge ? [] : finder.cuts;
+  const pieces = allLights().filter((light) => light.mac === finder.mac && light.output_index === finder.output).sort((a, b) => a.start - b.start);
+  const names = merge ? [finder.names[0] || ""] : finderPieces(finder).map((_, index) => finder.names[index] || "");
+  if (!names[0] && pieces[0]?.named) names[0] = pieces[0].name;
+  try {
+    await api(`/api/lumen/find/${finder.mac}/split`, { output: finder.output, cuts, names });
+    haptic("success");
+    state.finder = null;
+    await refresh();
+  } catch (error) {
+    finder.saving = false;
+    state.banner = String(error.message || error);
+    scheduleRender();
+  }
 }
 
 function ticks(length) {
@@ -929,7 +1097,7 @@ function onPointerUp(event) {
   }
   if (current.mode === "scroll" || current.mode === "long") return;
   if (Math.abs(dx) > 8 || Math.abs(dy) > 8) return;
-  if (event.target.closest("input, textarea, [data-dial], [data-temperature], [data-grab]")) return;
+  if (event.target.closest("input, textarea, [data-dial], [data-temperature], [data-grab], [data-finder-bar]")) return;
   handleTap(event, current);
 }
 
@@ -943,8 +1111,12 @@ function handleTap(event, current) {
     openSheet();
     return;
   }
-  if (event.target.closest("[data-status-alert]")) return go("maintenance");
-  if (event.target.closest("[data-back]")) return go("home");
+  // The status strip is the way to Maintenance (and Find) even when nothing needs attention.
+  if (event.target.closest("[data-status-alert], [data-property]")) return go("maintenance");
+  if (event.target.closest("[data-back]")) {
+    if (state.finder) closeFinder(false);
+    return go("home");
+  }
   if (event.target.closest("[data-undo]")) return performUndo();
   const zoneName = event.target.closest("[data-zone-name]");
   if (zoneName && state.selection.size === 0) {
@@ -1090,7 +1262,29 @@ function hsl(h, s, l) {
   return [Math.round(f(0) * 255), Math.round(f(8) * 255), Math.round(f(4) * 255)];
 }
 
+// Drag along the bar to walk the marker; the real strip follows.
+function onFinderBar(event) {
+  const bar = event.target.closest?.("[data-finder-bar]");
+  if (!bar || !state.finder) return;
+  const at = (point) => {
+    const rect = bar.getBoundingClientRect();
+    moveMarker(((point.clientX - rect.left) / rect.width) * state.finder.length - 0.5);
+  };
+  bar.setPointerCapture?.(event.pointerId);
+  at(event);
+  const move = (next) => at(next);
+  const up = () => {
+    bar.removeEventListener("pointermove", move);
+    bar.removeEventListener("pointerup", up);
+    bar.removeEventListener("pointercancel", up);
+  };
+  bar.addEventListener("pointermove", move);
+  bar.addEventListener("pointerup", up);
+  bar.addEventListener("pointercancel", up);
+}
+
 function bind() {
+  document.addEventListener("pointerdown", onFinderBar);
   document.addEventListener("pointerdown", onPointerDown);
   document.addEventListener("pointermove", onPointerMove);
   document.addEventListener("pointerup", onPointerUp);
@@ -1109,6 +1303,7 @@ function bind() {
     if (event.target.matches("[data-dial]")) dial(event.target.dataset.dial, Number(event.target.value), true);
   });
   document.addEventListener("input", (event) => {
+    if (event.target.matches("[data-piece-name]") && state.finder) state.finder.names[Number(event.target.dataset.pieceName)] = event.target.value;
     if (event.target.matches("[data-dial]")) dial(event.target.dataset.dial, Number(event.target.value), false);
     if (event.target.matches("[data-property-name]")) {
       window.clearTimeout(event.target._timer);
@@ -1123,12 +1318,13 @@ function bind() {
     event.preventDefault();
     const output = Number(form.dataset.claim);
     const card = form.closest("[data-output]");
-    const light = allLights().find((item) => item.mac === state.findMac && item.output_index === output);
+    const lightId = Number(form.dataset.claimLight);
+    const light = allLights().find((item) => item.id === lightId) || allLights().find((item) => item.mac === state.findMac && item.output_index === output);
     if (!light) return;
     const name = form.querySelector("[data-output-name]").value.trim();
     if (!name) return;
     const pick = state.zonePick[light.id];
-    const body = { output, name };
+    const body = { output, name, light_id: light.id };
     if (pick === "new") body.zone_name = form.querySelector("[data-new-zone]")?.value.trim() || "Zone";
     else if (pick) body.zone_id = Number(pick);
     await api(`/api/lumen/find/${light.mac}/claim`, body);
@@ -1144,8 +1340,7 @@ function bind() {
   document.addEventListener("click", async (event) => {
     if (event.target.matches("[data-zone-choice]")) {
       const card = event.target.closest("form");
-      const output = Number(card.dataset.claim);
-      const light = allLights().find((item) => item.mac === state.findMac && item.output_index === output);
+      const light = lightById(card.dataset.claimLight);
       if (light) state.zonePick[light.id] = Number(event.target.dataset.zoneChoice);
       scheduleRender();
     }
@@ -1153,10 +1348,17 @@ function bind() {
       const form = event.target.closest("form");
       const typed = form?.querySelector("[data-output-name]")?.value;
       state.names = state.names || {};
-      if (typed) state.names[form.dataset.claim] = typed;
+      if (typed) state.names[form.dataset.nameKey] = typed;
       state.zonePick[event.target.dataset.zoneNew] = "new";
       scheduleRender();
     }
+    if (event.target.closest("[data-finder-open]")) openFinder(Number(event.target.closest("[data-finder-open]").dataset.finderOpen));
+    if (event.target.closest("[data-step]")) moveMarker((state.finder?.marker || 0) + Number(event.target.closest("[data-step]").dataset.step));
+    if (event.target.closest("[data-cut]")) addCut();
+    if (event.target.closest("[data-uncut]")) removeCut(Number(event.target.closest("[data-uncut]").dataset.uncut));
+    if (event.target.closest("[data-split-save]")) closeFinder(true, false);
+    if (event.target.closest("[data-split-merge]")) closeFinder(true, true);
+    if (event.target.closest("[data-split-cancel]")) closeFinder(false);
     if (event.target.matches("[data-only]")) {
       const light = allLights().find((item) => item.mac === state.findMac && item.output_index === Number(event.target.dataset.only));
       if (light) api(`/api/lumen/find/${light.mac}/only`, { output: light.output_index }).catch(() => {});
@@ -1165,7 +1367,8 @@ function bind() {
       const output = Number(event.target.dataset.setLength);
       const light = allLights().find((item) => item.mac === state.findMac && item.output_index === output);
       const span = state.ruler[light?.id] || {};
-      const length = span.a == null ? light.length : Math.max(1, Math.abs((span.b ?? span.a + 25) - span.a));
+      const whole = outputBounds(allLights().filter((item) => item.mac === state.findMac && item.output_index === output)).length;
+      const length = span.a == null ? whole : Math.max(1, Math.abs((span.b ?? span.a + 25) - span.a));
       if (light) {
         await api(`/api/lumen/find/${light.mac}/length`, { output, length });
         await refresh();

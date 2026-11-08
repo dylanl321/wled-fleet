@@ -518,3 +518,95 @@ body[data-route="maintenance"] .sheet { display: none; }
   overflow: hidden;
   pointer-events: none;
 }
+
+/* ----- Find: outputs and the segment finder ------------------------------- */
+
+.output { padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.output-title {
+  margin: 18px var(--margin) 8px;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--secondary);
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+.output-title span { text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; }
+.output .light + .light { margin-top: 6px; }
+.piece-label { margin: 0; font-size: 13px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+
+.finder { margin: 10px var(--margin) 8px; }
+.finder-hint { margin: 0 0 12px; font-size: 13px; color: var(--secondary); }
+.finder-bar {
+  position: relative;
+  height: 44px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--off);
+  touch-action: none;
+  cursor: ew-resize;
+}
+/* Piece colors appear only here, where they match the strip. */
+.finder-band { position: absolute; top: 0; bottom: 0; opacity: 0.55; }
+.finder-cut { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: var(--bg); }
+.finder-marker {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 4px;
+  margin-left: -2px;
+  border-radius: 2px;
+  background: #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6), 0 0 12px rgba(255, 255, 255, 0.7);
+  transition: left 80ms linear;
+  pointer-events: none;
+}
+.finder-led {
+  margin: 10px 0 6px;
+  font-size: 30px;
+  font-weight: 650;
+  color: var(--text-strong);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+.finder-led span { font-size: 15px; font-weight: 400; color: var(--secondary); }
+.finder-steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.finder-steps button {
+  height: 48px;
+  border-radius: 12px;
+  background: #1c1c20;
+  color: var(--text-strong);
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  touch-action: manipulation;
+}
+.finder-cut-btn {
+  width: 100%;
+  height: 48px;
+  margin-top: 8px;
+  border-radius: 12px;
+  background: var(--text-strong);
+  color: var(--bg);
+  font-weight: 650;
+  font-size: 16px;
+}
+.finder-cut-btn:disabled { background: #1c1c20; color: var(--secondary); }
+.finder-pieces { list-style: none; margin: 14px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.finder-pieces li { display: flex; align-items: center; gap: 10px; }
+.finder-pieces i { width: 10px; height: 36px; border-radius: 5px; flex: none; }
+.finder-pieces div { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.finder-pieces input {
+  background: #1c1c20;
+  border: 0;
+  border-radius: 10px;
+  padding: 9px 12px;
+  color: var(--text-strong);
+}
+.finder-pieces span { font-size: 12px; color: var(--secondary); font-variant-numeric: tabular-nums; }
+.finder-uncut { width: 36px; height: 36px; border-radius: 18px; background: #1c1c20; color: var(--secondary); font-size: 18px; flex: none; }
+.finder .actions { margin: 14px 0 0; }
+.finder-save { background: var(--text-strong); color: var(--bg); font-weight: 650; }
+.finder-save:disabled { opacity: 0.5; }
