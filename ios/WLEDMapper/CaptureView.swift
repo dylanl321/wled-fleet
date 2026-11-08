@@ -286,7 +286,7 @@ final class CaptureModel: ObservableObject {
         }
         fixture.runs[active].controllerId = controller.id
         fixture.runs[active].outputIndex = chosen.index
-        fixture.runs[active].startIndex = chosen.start
+        fixture.runs[active].startIndex = 0
         fixture.runs[active].pixelCount = chosen.pixelCount
         fixture.runs[active].colorOrder = chosen.colorOrder
     }
@@ -383,7 +383,7 @@ final class CaptureModel: ObservableObject {
             id: UUID().uuidString,
             controllerId: controller.id,
             outputIndex: output.index,
-            startIndex: output.start,
+            startIndex: 0,
             pixelCount: output.pixelCount,
             pitchMm: 1000.0 / 60.0,
             colorOrder: output.colorOrder,

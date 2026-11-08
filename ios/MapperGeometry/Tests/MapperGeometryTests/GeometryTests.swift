@@ -25,8 +25,9 @@ final class GeometryTests: XCTestCase {
 
         let tree = try fixture("branching-tree.json")
         let treePixels = try compile(tree)
-        let trunk = treePixels.filter { $0.controller == "d1:67:00:00:00:07" }
-        let branches = treePixels.filter { $0.controller == "d1:67:00:00:00:08" }
+        XCTAssertEqual(Set(treePixels.map(\.controller)), ["d1:67:00:00:00:07"])
+        let trunk = treePixels.filter { $0.output == 0 }
+        let branches = treePixels.filter { $0.output == 1 }
         XCTAssertEqual(trunk.count, 141)
         XCTAssertEqual(branches.count, 102)
         assertClose(trunk[0].x, 0.08)
@@ -73,7 +74,7 @@ final class GeometryTests: XCTestCase {
 
     func testSchemaAcceptsFixturesAndRejectsATypo() throws {
         let schema = try Data(contentsOf: repoRoot().appendingPathComponent("schema/fixture.v1.json"))
-        for name in ["straight-1m.json", "wall-outline.json", "branching-tree.json"] {
+        for name in ["straight-1m.json", "wall-outline.json", "branching-tree.json", "two-controllers.json"] {
             let data = try Data(contentsOf: repoRoot().appendingPathComponent("fixtures/\(name)"))
             let errors = try SchemaCheck.validateFixture(data, schemaData: schema)
             XCTAssertEqual(errors, [], name)

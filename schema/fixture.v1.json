@@ -77,7 +77,11 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 80 },
         "controllerId": { "type": "string", "minLength": 1, "maxLength": 80 },
         "outputIndex": { "type": "integer", "minimum": 0 },
-        "startIndex": { "type": "integer", "minimum": 0 },
+        "startIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Index of this run's first pixel on its own output. Usually 0. This is not the controller-wide offset; the server adds the output's hw.led.ins start when it addresses WLED."
+        },
         "pixelCount": { "type": "integer", "minimum": 0 },
         "pitchMm": { "type": "number", "exclusiveMinimum": 0, "maximum": 1000 },
         "colorOrder": { "enum": ["GRB", "RGB", "BRG", "RBG", "BGR", "GBR", "GRBW", "RGBW", "BRGW", "RBGW", "BGRW", "GBRW"] },

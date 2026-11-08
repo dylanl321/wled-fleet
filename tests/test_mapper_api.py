@@ -20,6 +20,7 @@ from tests.support import start_mock, stop_mock
 ROOT = Path(__file__).resolve().parents[1]
 STRAIGHT = json.loads((ROOT / "fixtures" / "straight-1m.json").read_text(encoding="utf-8"))
 TREE = json.loads((ROOT / "fixtures" / "branching-tree.json").read_text(encoding="utf-8"))
+SPLIT = json.loads((ROOT / "fixtures" / "two-controllers.json").read_text(encoding="utf-8"))
 
 
 class PacketGrabber:
@@ -127,6 +128,70 @@ def test_controllers_read_color_order_from_cfg(tmp_path):
         assert controllers[0]["outputs"][1]["start"] == 60
 
 
+def test_second_output_highlight_uses_the_hardware_start(tmp_path):
+    grabber = PacketGrabber()
+    app = _app(tmp_path)
+    try:
+        with TestClient(app) as client:
+            app.state.mapper.ddp_port = grabber.port
+            mac = "aa:bb:cc:dd:ee:01"
+            _device(app, mac, leds=120)
+            cfg = {
+                "hw": {
+                    "led": {
+                        "total": 120,
+                        "ins": [
+                            {"start": 0, "len": 60, "pin": [16], "order": 0},
+                            {"start": 60, "len": 60, "pin": [2], "order": 0},
+                        ],
+                    }
+                }
+            }
+            BackupStore(app.state.fleet.db, tmp_path).save(
+                mac, json.dumps(cfg).encode(), b"{}", {"ver": "0.15.0", "name": "Dig-Uno", "leds": {"count": 120}}, "test", 5
+            )
+            fixture = json.loads(json.dumps(STRAIGHT))
+            fixture["runs"][0]["outputIndex"] = 1
+            fixture["runs"][0]["startIndex"] = 0
+            assert client.post("/api/mapper/fixtures", json=fixture).status_code == 200
+            lit = client.post(
+                f"/api/mapper/fixtures/{fixture['id']}/highlight",
+                json={"controller": mac, "output": 1, "index": 0},
+            )
+            assert lit.status_code == 200
+            packets = grabber.collect(0.6)
+            assert packets
+            body = packets[0][10:]
+            assert body[0:3] == bytes([0, 0, 0])
+            assert body[60 * 3 : 60 * 3 + 3] == bytes([255, 255, 255])
+    finally:
+        grabber.close()
+
+
+def test_old_start_index_is_converted_and_backed_up(tmp_path):
+    mac = "aa:bb:cc:dd:ee:01"
+    first = _app(tmp_path)
+    with TestClient(first) as client:
+        _device(first, mac, leds=120)
+        cfg = {
+            "hw": {"led": {"total": 120, "ins": [{"start": 0, "len": 60, "order": 0}, {"start": 60, "len": 60, "order": 0}]}}
+        }
+        BackupStore(first.state.fleet.db, tmp_path).save(
+            mac, json.dumps(cfg).encode(), b"{}", {"ver": "0.15.0", "name": "Dig-Uno", "leds": {"count": 120}}, "test", 5
+        )
+        fixture = json.loads(json.dumps(STRAIGHT))
+        fixture["runs"][0]["outputIndex"] = 1
+        fixture["runs"][0]["startIndex"] = 60
+        assert client.put(f"/api/mapper/fixtures/{fixture['id']}", json=fixture).status_code == 200
+    second = _app(tmp_path)
+    with TestClient(second) as client:
+        saved = client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}").json()
+        assert saved["runs"][0]["startIndex"] == 0
+        backup = tmp_path / "migration-backups" / "fixtures-before-startindex" / f"{STRAIGHT['id']}.json"
+        assert json.loads(backup.read_text())["runs"][0]["startIndex"] == 60
+        assert client.get(f"/api/mapper/fixtures/{STRAIGHT['id']}").json()["runs"][0]["startIndex"] == 0
+
+
 def test_highlight_and_effect_use_ddp(tmp_path):
     grabber = PacketGrabber()
     app = _app(tmp_path)
@@ -201,10 +266,10 @@ def test_ledmap_requires_confirm_then_reboots_and_reads_back(tmp_path):
             assert pushed.status_code == 200, pushed.text
             assert pushed.json()["confirmed"] is True
             assert pushed.json()["info"]["version"] == "0.15.1"
-            tree = client.post("/api/mapper/fixtures", json=TREE)
+            tree = client.post("/api/mapper/fixtures", json=SPLIT)
             assert tree.status_code == 200
             spanned = client.post(
-                f"/api/mapper/fixtures/{TREE['id']}/ledmap",
+                f"/api/mapper/fixtures/{SPLIT['id']}/ledmap",
                 json={"slot": 1, "mode": "height", "confirm": True},
             )
             assert spanned.status_code == 400

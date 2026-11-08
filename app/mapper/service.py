@@ -11,6 +11,7 @@ from pathlib import Path
 
 from app.discovery import normalize_mac
 from app.errors import FleetError, WledError
+from app.mapper.address import absolute_pixels, bus_start, migrate_saved_fixtures
 from app.mapper.advertise import MapperAdvertiser
 from app.mapper.compile import compile_fixture, pitch_mm_for_count, validate_counts, waypoint_index
 from app.mapper.controllers import channels_for_order, list_controllers
@@ -77,6 +78,7 @@ class MapperService:
 
     def start(self) -> None:
         backup_fleet_db(self.fleet.db, self.settings.data_dir)
+        migrate_saved_fixtures(self.store, self.fleet, self.settings.data_dir)
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         if self.settings.scheduler_enabled:
             self._advertiser = MapperAdvertiser()
@@ -221,7 +223,7 @@ class MapperService:
             raise FleetError("Ledmap slot must be from 1 to 9.", 400)
         mode = body.get("mode") or "height"
         fixture = self._require(fixture_id)
-        pixels = compile_fixture(fixture)
+        pixels = absolute_pixels(compile_fixture(fixture), self.controllers())
         controllers = []
         for pixel in pixels:
             if pixel.controller not in controllers:
@@ -282,7 +284,8 @@ class MapperService:
 
     def export(self, fixture_id: str, fmt: str, width: int, height: int, depth: int) -> tuple[str, str, str]:
         fixture = self._require(fixture_id)
-        pixels = compile_fixture(fixture)
+        compiled = compile_fixture(fixture)
+        pixels = absolute_pixels(compiled, self.controllers()) if fmt == "xmodel" else compiled
         filename = _safe_stem(str(fixture.get("name") or fixture_id))
         if fmt == "csv":
             return pixels_csv(pixels), "text/csv", f"{filename}.csv"
@@ -373,7 +376,8 @@ class MapperService:
             return
         order = _order_for(self.controllers(), mac, int(payload["output"]))
         channels = channels_for_order(order)
-        colors = {int(payload["index"]): (255, 255, 255)}
+        origin = bus_start(self.controllers(), mac, int(payload["output"])) or 0
+        colors = {origin + int(payload["index"]): (255, 255, 255)}
         led_count = _output_count(self.controllers(), mac)
         if led_count:
             for index in range(led_count):
@@ -388,12 +392,13 @@ class MapperService:
         black: bool = False,
         token: int | None = None,
     ) -> None:
-        pixels = compile_fixture(fixture)
-        if not pixels:
+        compiled = compile_fixture(fixture)
+        if not compiled:
             return
         if token is not None and token != self._token:
             return
-        colors = [(0, 0, 0)] * len(pixels) if black or effect is None else effect_colors(pixels, effect, phase)
+        pixels = absolute_pixels(compiled, self.controllers())
+        colors = [(0, 0, 0)] * len(pixels) if black or effect is None else effect_colors(compiled, effect, phase)
         grouped: dict[str, dict[int, tuple[int, int, int]]] = {}
         orders: dict[str, int] = {}
         for pixel, color in zip(pixels, colors):

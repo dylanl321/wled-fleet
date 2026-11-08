@@ -37,7 +37,7 @@ def load(name: str) -> dict:
 
 
 def test_regression_fixtures_match_the_schema():
-    for name in ("straight-1m.json", "wall-outline.json", "branching-tree.json"):
+    for name in ("straight-1m.json", "wall-outline.json", "branching-tree.json", "two-controllers.json"):
         require_valid(load(name))
 
 
@@ -77,8 +77,9 @@ def test_wall_outline_keeps_spacing_across_corners():
 def test_tree_helix_and_branches_on_two_outputs():
     fixture = load("branching-tree.json")
     pixels = compile_fixture(fixture)
-    trunk = [pixel for pixel in pixels if pixel.controller == "d1:67:00:00:00:07"]
-    branches = [pixel for pixel in pixels if pixel.controller == "d1:67:00:00:00:08"]
+    assert {pixel.controller for pixel in pixels} == {"d1:67:00:00:00:07"}
+    trunk = [pixel for pixel in pixels if pixel.output == 0]
+    branches = [pixel for pixel in pixels if pixel.output == 1]
     assert len(trunk) == 141
     assert len(branches) == 102
     assert (trunk[0].x, trunk[0].y, trunk[0].z) == pytest.approx((0.08, 0, 0))
@@ -138,6 +139,38 @@ def test_pixel_count_override_does_not_shift_the_next_segment():
         heights = [pixel.y for pixel in upper]
         assert heights == sorted(heights)
         assert len(set(round(value, 6) for value in heights)) == 60
+
+
+def test_two_outputs_keep_separate_addresses():
+    from app.mapper.address import absolute_pixels, convert_start_indices
+
+    pixels = compile_fixture(load("branching-tree.json"))
+    assert min(pixel.index for pixel in pixels if pixel.output == 1) == 0
+    controllers = [
+        {
+            "id": "d1:67:00:00:00:07",
+            "outputs": [
+                {"index": 0, "start": 0, "pixelCount": 141},
+                {"index": 1, "start": 141, "pixelCount": 102},
+            ],
+        }
+    ]
+    absolute = absolute_pixels(pixels, controllers)
+    assert len({pixel.index for pixel in absolute}) == len(absolute)
+    assert min(pixel.index for pixel in absolute if pixel.output == 1) == 141
+    stacked = absolute_pixels(pixels, [])
+    assert min(pixel.index for pixel in stacked if pixel.output == 1) == 141
+
+    old = {
+        "runs": [
+            {"controllerId": "d1:67:00:00:00:07", "outputIndex": 1, "startIndex": 141},
+            {"controllerId": "d1:67:00:00:00:07", "outputIndex": 0, "startIndex": 0},
+        ]
+    }
+    converted = convert_start_indices(old, controllers)
+    assert converted["runs"][0]["startIndex"] == 0
+    assert converted["runs"][1]["startIndex"] == 0
+    assert convert_start_indices(converted, controllers) is None
 
 
 def test_jump_does_not_consume_pixel_indices():
