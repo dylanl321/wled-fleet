@@ -35,6 +35,24 @@ struct DetectStep: Decodable {
     var shown: Bool
 }
 
+struct ImportItem: Decodable {
+    var action: String
+    var phoneCapture: Bool?
+    var name: String?
+    var reason: String?
+    var fixture: Fixture?
+    var proposed: Fixture?
+}
+
+struct ImportBatch: Decodable {
+    var results: [ImportItem]
+}
+
+enum ImportOutcome {
+    case fixture(Fixture)
+    case batch(ImportBatch)
+}
+
 struct ServerFailure: Error, LocalizedError {
     var message: String
     var status: Int = 0
@@ -299,18 +317,37 @@ final class ServerClient {
         return url
     }
 
-    func importFixture(name: String, filename: String, text: String) async throws -> Fixture {
+    func importFixture(name: String, filename: String, text: String, scaleMetresPerUnit: Double? = nil) async throws -> ImportOutcome {
         struct Body: Encodable {
             var name: String
             var filename: String
             var text: String
+            var scaleMetresPerUnit: Double?
         }
-        return try await send(
-            Fixture.self,
+        let data = try await raw(
             path: "/api/mapper/import",
             method: "POST",
-            body: Body(name: name, filename: filename, text: text)
+            body: Body(name: name, filename: filename, text: text, scaleMetresPerUnit: scaleMetresPerUnit)
         )
+        if let batch = try? decoder.decode(ImportBatch.self, from: data), !batch.results.isEmpty {
+            return .batch(batch)
+        }
+        if let proposal = try? decoder.decode(ImportItem.self, from: data), proposal.action == "proposal" {
+            return .batch(ImportBatch(results: [proposal]))
+        }
+        return .fixture(try decoder.decode(Fixture.self, from: data))
+    }
+
+    func startShow(_ playlist: String) async throws {
+        let _: Ack = try await send(path: "/api/mapper/shows/\(Self.pathPart(playlist))/start", method: "POST", body: [String: String]())
+    }
+
+    func stopShow(_ playlist: String) async throws {
+        let _: Ack = try await send(path: "/api/mapper/shows/\(Self.pathPart(playlist))/stop", method: "POST", body: [String: String]())
+    }
+
+    private static func pathPart(_ value: String) -> String {
+        value.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? value
     }
 
     func watch(_ onEvent: @escaping (EffectStatus) -> Void) -> Task<Void, Never> {

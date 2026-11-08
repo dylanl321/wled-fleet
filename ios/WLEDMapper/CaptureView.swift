@@ -305,7 +305,7 @@ struct CaptureScreen: View {
                         Button(controller.name) { capture.assign(controller, output: nil) }
                     }
                     ForEach(controller.outputs) { output in
-                        Button("\(controller.name) · out \(output.index + 1) · \(output.pixelCount)") {
+                        Button("\(controller.name)\(controller.showRunning ? " · show running" : "") · out \(output.index + 1) · \(output.pixelCount)") {
                             capture.assign(controller, output: output)
                         }
                     }

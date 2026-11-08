@@ -250,6 +250,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/api/status")
     async def status(request: Request) -> dict:
         fleet = fleet_of(request)
+        mapper = getattr(request.app.state, "mapper", None)
         return {
             "version": settings.app_version,
             "auth": bool(settings.admin_password),
@@ -257,6 +258,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "mdns": fleet.mdns.ready,
             "mdns_error": fleet.mdns.error,
             "scan": fleet.last_scan,
+            "xlightsDrift": mapper.status.get("xlightsDrift") if mapper is not None else None,
         }
 
     @app.get("/api/devices")

@@ -150,6 +150,15 @@ CREATE TABLE IF NOT EXISTS looks (
   position INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS controller_ownership (
+  mac TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  source TEXT NOT NULL,
+  playlist TEXT,
+  previous_state TEXT,
+  updated_at TEXT NOT NULL
+);
 """
 
 
@@ -486,6 +495,46 @@ class Database:
 
     def delete_setting(self, key: str) -> None:
         self._run("DELETE FROM settings WHERE key=?", (key,))
+
+    def get_ownership(self, mac: str) -> dict | None:
+        row = self._one(
+            "SELECT mac, owner, source, playlist, previous_state, updated_at FROM controller_ownership WHERE mac=?",
+            (mac,),
+        )
+        if row is None:
+            return None
+        raw = row.get("previous_state")
+        if isinstance(raw, str) and raw:
+            try:
+                row["previous_state"] = json.loads(raw)
+            except json.JSONDecodeError:
+                row["previous_state"] = None
+        else:
+            row["previous_state"] = None
+        return row
+
+    def save_ownership(
+        self,
+        mac: str,
+        owner: str,
+        source: str,
+        playlist: str | None,
+        previous_state: dict | None,
+    ) -> None:
+        payload = None if previous_state is None else json.dumps(previous_state, separators=(",", ":"))
+        self._run(
+            """
+            INSERT INTO controller_ownership (mac, owner, source, playlist, previous_state, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(mac) DO UPDATE SET
+              owner=excluded.owner,
+              source=excluded.source,
+              playlist=excluded.playlist,
+              previous_state=excluded.previous_state,
+              updated_at=excluded.updated_at
+            """,
+            (mac, owner, source, playlist, payload, utcnow()),
+        )
 
     def setting_map(self) -> dict[str, str]:
         return {row["key"]: row["value"] for row in self._all("SELECT key, value FROM settings")}

@@ -603,8 +603,11 @@ public struct ControllerRecord: Equatable, Codable, Identifiable {
     public var arch: String?
     public var version: String?
     public var outputs: [ControllerOutput]
+    public var owner: String?
 
-    public init(id: String, name: String, ip: String, port: Int, online: Bool, arch: String?, version: String?, outputs: [ControllerOutput]) {
+    public var showRunning: Bool { owner == "xlights" }
+
+    public init(id: String, name: String, ip: String, port: Int, online: Bool, arch: String?, version: String?, outputs: [ControllerOutput], owner: String? = nil) {
         self.id = id
         self.name = name
         self.ip = ip
@@ -613,7 +616,17 @@ public struct ControllerRecord: Equatable, Codable, Identifiable {
         self.arch = arch
         self.version = version
         self.outputs = outputs
+        self.owner = owner
     }
+}
+
+public struct XlightsDrift: Equatable, Codable {
+    public var inSync: Bool
+    public var placeholders: Int
+    public var unassigned: Int
+    public var ambiguous: Int
+    public var checkedAt: String?
+    public var error: String?
 }
 
 public struct EffectStatus: Equatable, Codable {
@@ -623,14 +636,36 @@ public struct EffectStatus: Equatable, Codable {
     public var frame: Int
     public var fps: Double
     public var error: String?
+    public var playerConfigured: Bool?
+    public var playlist: String?
+    public var showRunning: Bool?
+    public var showPlaylist: String?
+    public var xlightsDrift: XlightsDrift?
 
-    public init(running: Bool = false, effect: String? = nil, fixtureId: String? = nil, frame: Int = 0, fps: Double = 0, error: String? = nil) {
+    public init(
+        running: Bool = false,
+        effect: String? = nil,
+        fixtureId: String? = nil,
+        frame: Int = 0,
+        fps: Double = 0,
+        error: String? = nil,
+        playerConfigured: Bool? = nil,
+        playlist: String? = nil,
+        showRunning: Bool? = nil,
+        showPlaylist: String? = nil,
+        xlightsDrift: XlightsDrift? = nil
+    ) {
         self.running = running
         self.effect = effect
         self.fixtureId = fixtureId
         self.frame = frame
         self.fps = fps
         self.error = error
+        self.playerConfigured = playerConfigured
+        self.playlist = playlist
+        self.showRunning = showRunning
+        self.showPlaylist = showPlaylist
+        self.xlightsDrift = xlightsDrift
     }
 }
 

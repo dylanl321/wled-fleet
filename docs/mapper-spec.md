@@ -1,10 +1,10 @@
 # WLED Mapper — working spec
 
-This is the Nov 7, 2026 specification plus the decisions recorded while building it. Where they disagree, the recorded decisions win.
+This is the Nov 8, 2026 specification (v2) plus the decisions recorded while building it. Where they disagree, the recorded decisions win.
 
 ## Recorded decisions
 
-- Routes live under `/api/mapper/` (`/api/mapper/fixtures`, `/api/mapper/controllers`, and the pixelmap, highlight, effect, stop, ledmap, and export routes). The fleet session gate already covers `/api`.
+- Routes live under `/api/mapper/`. That includes fixtures, controllers, pixelmap, highlight, effect, stop, ledmap, export, import, `POST /controllers/{id}/owner`, `POST /hooks/xschedule`, `POST /shows/{playlist}/start` and `/stop`, `POST /xlights/sync-controllers`, and mapper settings. The fleet session gate already covers `/api`.
 - Live highlight and effect status use server-sent events at `GET /api/mapper/live`, with the same payload at `GET /api/mapper/status`. There is no WebSocket.
 - The phone remembers the server URL and caches the fixture list in UserDefaults so the list does not flash empty. The password, when there is one, stays in the keychain. The ARWorldMap stays on the phone; the server stores the fixture JSON.
 - `startIndex` is the index of the run's first pixel on that output, usually 0. It is not the controller-wide offset. The server adds that output's `hw.led.ins[].start` when it builds a DDP frame, a ledmap, or an xLights node number. Fixtures saved by the first mapper build, which copied the hardware start into `startIndex`, are converted on startup. The original JSON is copied to `migration-backups/fixtures-before-startindex/` first.
@@ -41,12 +41,20 @@ This is the Nov 7, 2026 specification plus the decisions recorded while building
 - xLights gets a 2D custom model first. Depth layers and a Poly Line model are included. A true 2026.04 file was not available to verify.
 - The product name is WLED Mapper.
 - Tap-to-place is the capture path. Camera detection is the check when a pixel has to be exact.
+- One sender at a time. Each controller has an owner, `fleet`, `xlights`, or `none`, stored in `controller_ownership`. Boards already in the fleet stay with the fleet; the original database is copied to `migration-backups/fleet-before-ownership.db` once. The renderer sends only while the owner is `fleet`. A ledmap upload reboots the board, so it is refused while the owner is `xlights`. Handing a board to xLights saves its WLED look. Handing it back to the fleet writes that look again.
+- xSchedule is how the fleet learns a show is running. xSchedule calls `POST /api/mapper/hooks/xschedule` when a playlist starts or stops, and the phone calls `POST /api/mapper/shows/{playlist}/start` and `/stop`, which call xSchedule and set the owner on that show's boards. The fallback reads WLED `/json/info`: `live` true and `lip` different from this server's address means a show, and `live` ending hands that inferred board back. A show xSchedule or the phone started is not released by the fallback.
+- The player is xSchedule. `GET /xScheduleQuery` and `GET /xScheduleCommand` are implemented (`GetPlayLists`, `GetPlayingStatus`, `Play specified playlist`, `Stop specified playlist`). FPP is the same player interface and is left unimplemented. The player URL, kind (`xschedule` or `fpp`), playlist name, and xLights show folder are server settings: `MAPPER_PLAYER_URL`, `MAPPER_PLAYER_KIND`, `MAPPER_PLAYLIST`, `MAPPER_XLIGHTS_SHOW`, or `PUT /api/mapper/settings`. The phone shows one Start/Stop control when a URL and a playlist are set, and hides it otherwise.
+- The sync fixes gaps, and it previews before it writes. `POST /api/mapper/xlights/sync-controllers` reads `xlights_networks.xml` and the `Controller` attributes in `xlights_rgbeffects.xml`. The response is the diff. `apply: true` is the only write, and it writes a timestamped backup of each file first. It fills a channel count of 1, adds a fleet board the show does not list, updates an IP when the name still matches, and assigns a controller to a model only when one match is unambiguous. Ambiguous models are listed and left alone. A check at startup and then nightly runs the same diff, stores it, and surfaces it on `GET /api/status` as `xlightsDrift`. That check does not write.
+- An xLights show import reads `xlights_rgbeffects.xml` as well as a single `.xmodel`. It asks for `scaleMetresPerUnit`. A new name is saved. An existing fixture is returned as a proposal. A phone capture (a waypoint tapped, snapped, typed, or estimated) is not overwritten unless the phone sends that proposal back.
+- v2 calls show playback and ownership Phase 5 in the resource list. Camera detection, already built, stays the capture check. The two share a number in the spec; they are different work.
+
+---
 
 ---
 
 # Spatial LED Mapper — Developer Specification
 
-Nov 7, 2026 · @Dylan
+Nov 8, 2026 · @Dylan
 
 ## 1. The problem
 
@@ -75,6 +83,25 @@ The product has three layers. Build them in this order; each one is useful on it
 1. **Capture** — Record the physical path of each strip as an ordered list of 3D points, using the camera (ARKit) and, on supported phones, LiDAR. Attach the wiring facts: which controller, which output, how many pixels, which direction the data flows.
 2. **Model** — Turn that path into a table: for every pixel on every output, an (x, y, z) position in one shared coordinate frame. Show it as a rotatable 3D preview so the user can confirm it matches reality.
 3. **Use** — Consume the table to (a) generate WLED ledmap files for single-controller fixtures, (b) stream spatially correct effects to all controllers at once from the existing server, and (c) export an xLights model file.
+
+**Who does what.** Each piece has one job, and the shared map is what connects them.
+
+| Piece | Job | Never does |
+| --- | --- | --- |
+| Phone app | Measures where every pixel physically is; previews the map; is the everyday remote. | Talk to boards directly; render shows. |
+| WLED Fleet server (existing) | Keeps boards healthy (discovery, backups, firmware); stores the map; plays everyday looks and position-based effects; hands boards to xLights and takes them back. | Sequence music-synced shows. |
+| xLights / xSchedule | Choreographed, timed, music-synced shows, using models exported from the map. | Own board configuration or the map. |
+| WLED firmware | Drives the pixels; runs its own effects when nobody is streaming. | Anything new. WLED is not modified. |
+
+**Five rules the design follows.**
+
+1. **The map is shared.** A fixture is mapped once with the phone and stored on the fleet. xLights receives it as a model export; a model edited in xLights can be imported back. Nobody redraws the tree by hand in two tools.
+2. **Wiring comes from one place.** The fleet already knows every board, its outputs and pixel counts. Every export carries controller, protocol and start-channel details, so xLights drives the right board and port without anyone typing IPs or channel numbers.
+3. **One sender at a time.** The fleet and xLights both stream DDP to the same boards; if both send, the lights fight. During a show the fleet pauses its effects and marks those boards "show running"; when the show ends it restores the normal looks.
+4. **Everyday versus showtime.** Colours, brightness, quick looks and position-based effects (fill from bottom, height rainbow, branch chase) live in the fleet and the phone app. Timed sequences live in xLights. The phone can start or stop an xLights playlist, so it stays the single remote.
+5. **Fleet care covers both.** Backups, firmware and finding a board are always the fleet's job, and a replaced or re-addressed board flows into the xLights controller list through the sync, so the show setup never drifts.
+
+**Where things stand today.** The xLights show on the NAS has 5 WLED controllers, all on DDP. Three are placeholders with a channel count of 1, and 6 of the 12 models have no controller assigned. Rule 2 is aimed at exactly this: the first sync fills those in from the fleet.
 
 **What this is not.** It is not a replacement for WLED's effect engine, not a sequencer like xLights, and not a general 3D scanning app. The app captures a *path*, not a mesh of the whole object. The tree's bark, the wall's texture and the room are irrelevant; only the line the wire takes matters.
 
@@ -290,27 +317,37 @@ Open one exported `.xmodel` from the auschristmaslighting.com library in a text 
 
 **9.5 Live-check during capture.** Not an export, but the same plumbing: while the user places waypoint `k`, the server lights pixel `k` white over DDP so they can see they are tapping the right spot. Cheap to build once 9.3 exists, and it catches most capture mistakes immediately.
 
+**9.6 xLights import.** The reverse of 9.4. Read a `.xmodel`, or the models in the show's `xlights_rgbeffects.xml`, turn each model's node grid or Poly Line points into Waypoints and Segments, and attach its controller and start channel to a Run. xLights positions are in layout units, so the importer asks for one real-world scale (metres per unit) and then applies the normalisation from 8.6. Import creates a new Fixture or proposes changes to an existing one; it never silently overwrites a phone capture.
+
+**9.7 Wiring details in every export.** Both exporters write the controller block from the fleet's registry: controller name, IP, protocol (DDP), output, start channel and pixel count. If xLights does not yet know the controller, the sync adds it to the show's controller list (`xlights_networks.xml`) too. The fleet is the only place this information is ever typed. When a board is replaced, re-running the sync updates xLights.
+
 ## 10. System architecture
 
 Three tiers. The phone only captures and previews; the server owns the model, the math and all talking to controllers; WLED is not modified at all.
 
-&#91;embedded content: system architecture · 3 tiers, 2 protocols\]
+&#91;embedded content: system architecture · one shared map, one sender per board\]
 
 Solid boxes are new work; dashed boxes already exist or belong to someone else. The app never talks to a controller directly, so every controller-side detail (IPs, outputs, firmware quirks) stays in the one place that already handles it.
 
 **Why the server, not the phone, renders effects.** Streaming 30+ frames a second to several controllers must run continuously, survive the phone locking, and stay on the home network. The existing Docker service on TrueNAS is already there, already discovers every board, and already calls the WLED API. Adding a renderer and a DDP sender to it is a small step; building the same thing to run reliably in an iOS background task is not.
+
+**One sender at a time.** xLights already streams DDP to every board in this setup, and the fleet's renderer will too, so each board needs exactly one owner at any moment. The server keeps an `owner` per controller: `fleet`, `xlights` or `none`. Ownership changes in one of three ways, in order of preference: xSchedule tells the server when a playlist starts and stops (its REST API and plugin hooks allow this); the phone tells the server because it started the show; or the server notices a board has entered WLED's realtime mode from another source (`/json/info` reports `live` and the sender's IP in `lip`) and infers a show. While `owner = xlights`, the renderer skips that board, the app shows it as "show running", and ledmap pushes and reboots are blocked. When ownership returns to the fleet, it restores the board's previous look.
 
 **Interfaces to define.**
 
 | Interface | Direction | Shape |
 | --- | --- | --- |
 | Fixture CRUD | app ↔ server | `GET/PUT /fixtures/{id}` with the JSON from section 6. |
-| Controller list | server → app | `GET /controllers` → id, name, IP, outputs with pixel counts (already exists in some form). |
+| Controller list | server → app | `GET /controllers` → id, name, IP, outputs with pixel counts, current owner (already exists in some form). |
 | Pixel map | server → app | `GET /fixtures/{id}/pixelmap` → CSV or JSON rows. Server computes; app only displays. |
 | Light one pixel | app → server | `POST /fixtures/{id}/highlight {controller, output, index}` → server sends a DDP frame. Used during capture. |
-| Run effect | app → server | `POST /fixtures/{id}/effect {name, params}`; server streams until told to stop. |
-| Push ledmap | app → server | `POST /fixtures/{id}/ledmap {slot, mode}` → server generates, uploads via WLED `/edit`, reboots. |
-| Export | app → server | `GET /fixtures/{id}/export?format=xmodel` → file download. |
+| Run effect | app → server | `POST /fixtures/{id}/effect {name, params}`; server streams until told to stop, skipping boards it does not own. |
+| Push ledmap | app → server | `POST /fixtures/{id}/ledmap {slot, mode}` → server generates, uploads via WLED `/edit`, reboots. Refused while a show owns the board. |
+| Export | app → server | `GET /fixtures/{id}/export?format=xmodel` → file with wiring details from the registry. |
+| Import | app → server | `POST /fixtures/import {source, scaleMetresPerUnit}` with an `.xmodel` or `xlights_rgbeffects.xml`. |
+| Controller sync | server → xLights | `POST /xlights/sync-controllers` writes or updates xLights controller entries from the registry. |
+| Ownership | xSchedule or app → server | `POST /controllers/{id}/owner {owner}`; server pauses or resumes its effects and updates status. |
+| Show control | app → server → xSchedule | `POST /shows/{playlist}/start` and `/stop`; server calls xSchedule's API and sets ownership for the show's boards. |
 
 ## 11. Technology choices
 
@@ -338,11 +375,11 @@ Native Swift on the phone, the existing server language on the back end, standar
 
 ## 12. Phased build plan
 
-Six phases, each ending in a demo on real lights. Phase 1 is the first thing the user can hold; Phase 2 is the first thing that solves the tree.
+Seven phases, each ending in a demo on real lights. Phase 1 is the first thing the user can hold; Phase 2 is the first thing that solves the tree.
 
-The embedded build-plan diagram was not in the uploaded spec. From the text around it, and from the phase labels in section 14: phase 0 is the server, phase 1 is phone capture of a simple run, phase 2 is the tree and spatial effects, phase 3 is LiDAR and helix fitting, phase 4 is ledmap and xLights, and phase 5 is camera pixel detection. The checked-in fixtures for those phases are listed at the top of this file.
+&#91;embedded content: build plan · 7 phases, each gated by a live demo\]
 
-Phase 0 (server) and Phase 1 (app) can be built in parallel by two people, or in that order by one. Nothing after Phase 2 is required for the core promise; Phases 3 to 5 each add a capture shortcut or an export, and their order can change with what the user needs next.
+Phase 0 (server) and Phase 1 (app) can be built in parallel by two people, or in that order by one. Nothing after Phase 2 is required for the core promise; Phases 3 to 6 each add a capture shortcut, an xLights integration or a verification step, and their order can change with what the user needs next.
 
 **Definition of done for every phase.** The gate passes on real hardware, not a simulator. The Fixture JSON for the test fixture is checked into the repo as a regression fixture. A five-minute screen recording of the demo exists.
 
@@ -354,6 +391,8 @@ The biggest risk is not the code; it is expecting centimetre precision from a ph
 
 | Risk | Likelihood | Effect | Mitigation |
 | --- | --- | --- | --- |
+| **Two senders at once** (fleet renderer and xLights both stream DDP) | High without rule 3 | Flicker, fighting colours, hard-to-explain failures during shows. | Owner flag per controller; the renderer refuses to send to boards it does not own; status visible in the app. |
+| **xLights config drift** (today: 3 placeholder controllers, 6 models without a controller) | High | Shows drive the wrong port, or nothing. | Controller sync from the fleet on every export; a nightly check that diffs xLights controllers against the registry. |
 | **ARKit drift** over a long walk around a large fixture | High | Waypoints at the end of the path are offset a few cm from the start. | Keep sessions short; save and relocalise with `ARWorldMap`; place a reference tap at the start that the user re-taps at the end so the app can measure and distribute the error. |
 | **Taps miss thin branches** (no LiDAR, or LiDAR mesh too coarse) | High on non-Pro phones | Point lands on the wall or ground behind. | Depth-nudge slider; snap to the nearest point on the already-fitted segment; prefer LiDAR devices for trees. |
 | **Pixel count mismatch** between model and controller | Medium | Effects appear shifted or truncated on one branch. | Live count readout during capture; per-segment override; final scale-to-fit option; pixel detection as the authoritative check. |
@@ -407,15 +446,24 @@ Everything below was checked while writing this spec. Read the first group befor
 - [Pixelblaze pixel mapping](https://docsearch.algolia.com/mcp/docs/repo/simap/pixelblaze) — the `render3D(index, x, y, z)` model: a per-pixel function of position and time. Copy this programming model for the server's renderer; it is the simplest way to write spatial effects.
 - [LEDController mapping concepts (Finndersen)](https://github.com/Finndersen/LEDController/wiki/Reference) — "spatial strip segments" and "linear-to-spatial mappers", a tidy vocabulary for projecting 1D effects along a 3D direction.
 
+**Show playback and ownership (Phase 5)**
+
+- [xSchedule overview (xLightsSequencer)](https://tomevault.io/tome/xLightsSequencer/xSchedule) — xSchedule plays FSEQ sequences, manages playlists, outputs over E1.31, Art-Net and DDP, and includes a web UI, a plugin system and a REST API. That API is the hook for start/stop and ownership. Linux and Windows only.
+- [xSchedule on Mac is deprecated (auschristmaslighting)](https://auschristmaslighting.com/threads/unable-to-schedule-in-xlights-scheduler.17179/latest) — community advice is to run xSchedule on Windows or Linux, or use FPP on a Raspberry Pi.
+- This show's xLights configuration, read on 2026-11-08: 5 WLED controllers on DDP (Dig-Quad-V3, Dig-Uno-V3, WLED-Gledopto, Eaves at 780 channels, Front Door at 900 channels); 12 models, of which 6 have no controller and several Poly Lines have a pixel count of 0.
+
 ## 15. Open questions
 
 Decide these before the matching phase starts. None blocks Phase 0 or Phase 1.
 
 - [ ] **Server language.** The existing Docker service's language decides how the DDP sender and compiler are written. Confirm it, and whether it already exposes a REST API the app can extend.
+- [x] **How does the fleet learn a show is running?** xSchedule is primary: its hook and the phone's start/stop. The fallback is WLED's realtime flag (`live` true and `lip` not the fleet server). Decided for Phase 5.
+- [x] **xSchedule or FPP?** xSchedule. FPP stays behind the same player interface and is not implemented.
+- [x] **Who fixes today's xLights gaps?** The fleet sync. It previews the diff, and writes only with `apply: true` after a timestamped backup. It fills channel count 1 and assigns a controller only when the match is unambiguous.
 - [ ] **Which phone will do the capturing?** LiDAR (Pro) or not. This decides whether Phase 3 mesh snapping is on the critical path or a nice-to-have.
 - [ ] **One fixture or many per session?** If the whole property is one "scene" (so a wave can run from the porch across the roofline to the tree), fixtures need a shared outdoor coordinate frame, which is harder than per-fixture frames. Suggest per-fixture first.
-- [ ] **How exact must the tree be?** If ±2 pixels is fine, tap-to-place alone may be enough and Phase 5 can wait. If every pixel must be right, Phase 5 moves earlier.
+- [ ] **How exact must the tree be?** If ±2 pixels is fine, tap-to-place alone may be enough and Phase 6 can wait. If every pixel must be right, Phase 6 moves earlier.
 - [ ] **Should ledmaps be pushed automatically?** Uploading and rebooting a controller is disruptive. Decide whether the app does it on save or the user presses a button.
-- [ ] **Effect ownership.** Should the server's spatial effects appear inside WLED's UI (as a preset that switches to realtime) or only in the app? The first is friendlier for household members who already use WLED.
+- [ ] **Effect ownership.** Should the fleet's spatial effects appear inside WLED's UI (as a preset that switches to realtime) or only in the app? The first is friendlier for household members who already use WLED.
 - [ ] **xLights depth.** Is a 2D Custom Model (unwrapped tree) enough for xLights, or is a true 3D model wanted? 3D is more work in the exporter and in xLights itself.
 - [ ] **Name.** The project needs one before the repo is created.

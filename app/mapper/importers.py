@@ -28,14 +28,20 @@ def import_text(
     name: str = "",
     controller_id: str = "",
     output_index: int = 0,
+    scale_metres_per_unit: float | None = None,
 ) -> dict:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("That file is empty.")
     if len(text) > MAX_TEXT:
         raise ValueError("That file is too large to import.")
+    if is_rgbeffects(text, filename):
+        raise ValueError("This is an xLights show. Import it as a show, with a scale.")
     kind = _detect(text, filename)
     if kind == "xmodel":
-        return _from_xmodel(text, name=name, controller_id=controller_id, output_index=output_index)
+        return scale_fixture(
+            _from_xmodel(text, name=name, controller_id=controller_id, output_index=output_index),
+            scale_metres_per_unit,
+        )
     if kind == "pixelblaze":
         payload = _load_json(text)
         if isinstance(payload, list):
@@ -61,6 +67,96 @@ def import_text(
             output_index=output_index,
         )
     raise ValueError("Choose a CSV, a Pixelblaze map, or an xLights model.")
+
+
+def is_rgbeffects(text: str, filename: str = "") -> bool:
+    lower = filename.lower()
+    if lower.endswith("xlights_rgbeffects.xml") or lower.endswith("rgbeffects.xml"):
+        return True
+    stripped = text.lstrip("\ufeff \t\r\n").lower()
+    return stripped.startswith("<xrgb") or stripped.startswith("<?xml") and "<xrgb" in stripped[:400]
+
+
+def import_rgbeffects(
+    text: str,
+    *,
+    scale_metres_per_unit: float,
+    filename: str = "",
+    name: str = "",
+    controller_id: str = "",
+    output_index: int = 0,
+) -> list[dict]:
+    """One result per model. A model that cannot be placed is skipped, not fatal."""
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("That file is empty.")
+    if len(text) > MAX_TEXT:
+        raise ValueError("That file is too large to import.")
+    if "<!DOCTYPE" in text.upper() or "<!ENTITY" in text.upper():
+        raise ValueError("That xLights file is not usable.")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise ValueError("That xLights file could not be read.") from exc
+    nodes = []
+    for parent in root.iter():
+        if _local(parent.tag) != "models":
+            continue
+        for child in list(parent):
+            if _local(child.tag) == "model":
+                nodes.append(child)
+    if not nodes:
+        raise ValueError("That xLights show has no models.")
+    results = []
+    for node in nodes:
+        model_name = (node.attrib.get("name") or "").strip()
+        try:
+            document = _from_xmodel(
+                ET.tostring(node, encoding="unicode"),
+                name=name or model_name,
+                controller_id=controller_id,
+                output_index=output_index,
+            )
+            document = scale_fixture(document, scale_metres_per_unit)
+        except ValueError as exc:
+            results.append({"name": model_name or name or "Imported", "fixture": None, "skipped": str(exc)})
+            continue
+        if model_name and not name:
+            document["name"] = model_name[:80]
+        results.append({"name": document["name"], "fixture": document, "skipped": None})
+    if not results:
+        raise ValueError("That xLights show has no models.")
+    return results
+
+
+def scale_fixture(document: dict, scale: float | None) -> dict:
+    if scale is None:
+        return document
+    try:
+        factor = float(scale)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("scaleMetresPerUnit must be a number.") from exc
+    if factor <= 0 or factor > 1000:
+        raise ValueError("scaleMetresPerUnit must be greater than 0 and at most 1000.")
+    if factor == 1:
+        return document
+    for waypoint in document.get("waypoints") or []:
+        if isinstance(waypoint, dict) and isinstance(waypoint.get("position"), list):
+            waypoint["position"] = [float(value) * factor for value in waypoint["position"]]
+    for run in document.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        pitch = float(run.get("pitchMm") or 0) * factor
+        run["pitchMm"] = pitch if pitch <= 1000 else 1000.0
+    return document
+
+
+def phone_capture(document: dict) -> bool:
+    sources = {
+        item.get("source")
+        for item in document.get("waypoints") or []
+        if isinstance(item, dict)
+    }
+    return bool(sources & {"tapped", "lidarSnapped", "typed", "estimated"})
 
 
 def _detect(text: str, filename: str) -> str:

@@ -27,6 +27,58 @@ def mount_mapper(app) -> None:
     async def controllers(request: Request) -> dict:
         return {"controllers": mapper_of(request).controllers()}
 
+    @router.post("/controllers/{controller_id}/owner")
+    async def set_owner(controller_id: str, request: Request) -> dict:
+        body = await _body(request)
+        owner = body.get("owner")
+        if not isinstance(owner, str):
+            raise HTTPException(status_code=400, detail="owner is required")
+        playlist = body.get("playlist") if isinstance(body.get("playlist"), str) else None
+        return await mapper_of(request).set_owner(controller_id, owner, "manual", playlist)
+
+    @router.api_route("/hooks/xschedule", methods=["GET", "POST"])
+    async def xschedule_hook(request: Request) -> dict:
+        payload: dict = {}
+        if request.method == "POST":
+            raw = await request.body()
+            if raw:
+                try:
+                    loaded = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise HTTPException(status_code=400, detail="Body must be JSON") from exc
+                if not isinstance(loaded, dict):
+                    raise HTTPException(status_code=400, detail="Body must be a JSON object")
+                payload = loaded
+        event = payload.get("event") or request.query_params.get("event") or request.query_params.get("Event")
+        playlist = payload.get("playlist") or request.query_params.get("playlist") or request.query_params.get("Parameters") or ""
+        if not isinstance(event, str) or not event.strip():
+            raise HTTPException(status_code=400, detail="event is required")
+        if not isinstance(playlist, str):
+            playlist = ""
+        return await mapper_of(request).xschedule_hook(event, playlist)
+
+    @router.post("/shows/{playlist}/start")
+    async def start_show(playlist: str, request: Request) -> dict:
+        return await mapper_of(request).start_show(playlist)
+
+    @router.post("/shows/{playlist}/stop")
+    async def stop_show(playlist: str, request: Request) -> dict:
+        return await mapper_of(request).stop_show(playlist)
+
+    @router.post("/xlights/sync-controllers")
+    async def sync_controllers(request: Request) -> dict:
+        body = await _optional_body(request)
+        show = body.get("show") if isinstance(body.get("show"), str) else None
+        return mapper_of(request).sync_controllers(body.get("apply") is True, show)
+
+    @router.get("/settings")
+    async def mapper_settings(request: Request) -> dict:
+        return mapper_of(request).mapper_settings()
+
+    @router.put("/settings")
+    async def put_mapper_settings(request: Request) -> dict:
+        return mapper_of(request).update_mapper_settings(await _body(request))
+
     @router.get("/fixtures")
     async def list_fixtures(request: Request) -> dict:
         return {"fixtures": mapper_of(request).list_fixtures()}
@@ -43,7 +95,45 @@ def mount_mapper(app) -> None:
         output = body.get("outputIndex", 0)
         if isinstance(output, bool) or not isinstance(output, int):
             raise HTTPException(status_code=400, detail="outputIndex must be an integer")
-        return mapper_of(request).import_document(text, filename, name, controller, output)
+        return mapper_of(request).import_document(
+            text,
+            filename,
+            name,
+            controller,
+            output,
+            _scale(body.get("scaleMetresPerUnit")),
+            body.get("apply") is True,
+            body.get("replacePhoneCapture") is True,
+        )
+
+    @router.post("/fixtures/import")
+    async def import_fixture_spec(request: Request) -> dict:
+        body = await _body(request)
+        source = body.get("source", body.get("text"))
+        if isinstance(source, dict):
+            text = source.get("text")
+            filename = source.get("filename") if isinstance(source.get("filename"), str) else ""
+            name = source.get("name") if isinstance(source.get("name"), str) else ""
+        else:
+            text = source
+            filename = body.get("filename") if isinstance(body.get("filename"), str) else ""
+            name = body.get("name") if isinstance(body.get("name"), str) else ""
+        if not isinstance(text, str):
+            raise HTTPException(status_code=400, detail="source text is required")
+        controller = body.get("controllerId") if isinstance(body.get("controllerId"), str) else ""
+        output = body.get("outputIndex", 0)
+        if isinstance(output, bool) or not isinstance(output, int):
+            raise HTTPException(status_code=400, detail="outputIndex must be an integer")
+        return mapper_of(request).import_document(
+            text,
+            filename,
+            name,
+            controller,
+            output,
+            _scale(body.get("scaleMetresPerUnit")),
+            body.get("apply") is True,
+            body.get("replacePhoneCapture") is True,
+        )
 
     @router.post("/fixtures")
     async def create_fixture(request: Request) -> dict:
@@ -139,7 +229,8 @@ def mount_mapper(app) -> None:
 
     @router.get("/status")
     async def status(request: Request) -> dict:
-        return mapper_of(request).status
+        service = mapper_of(request)
+        return {**service.status, **service._show_fields()}
 
     @router.get("/live")
     async def live(request: Request) -> StreamingResponse:
@@ -198,6 +289,27 @@ def _point(body: dict, key: str) -> list:
     if not isinstance(value, list) or len(value) != 3 or not all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value):
         raise ValueError(key)
     return value
+
+
+async def _optional_body(request: Request) -> dict:
+    raw = await request.body()
+    if not raw:
+        return {}
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Body must be JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+    return payload
+
+
+def _scale(raw: object) -> float | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise HTTPException(status_code=400, detail="scaleMetresPerUnit must be a number")
+    return float(raw)
 
 
 def _positive(raw: str | None, default: int) -> int:
