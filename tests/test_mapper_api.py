@@ -236,6 +236,198 @@ def test_highlight_and_effect_use_ddp(tmp_path):
         grabber.close()
 
 
+def test_detect_steps_on_request_and_restores_the_previous_state(tmp_path):
+    spec = MockSpec(
+        mac="aabbccddee01",
+        name="Shelf",
+        mdns="shelf",
+        arch="esp32",
+        release="Dig-Uno",
+        version="0.15.1",
+        leds=60,
+    )
+    server, port = start_mock(spec)
+    grabber = PacketGrabber()
+    app = _app(tmp_path)
+    try:
+        with TestClient(app) as client:
+            app.state.mapper.ddp_port = grabber.port
+            _device(app, "aa:bb:cc:dd:ee:01", port=port, leds=60)
+            assert client.post("/api/mapper/fixtures", json=STRAIGHT).status_code == 200
+            started = client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect",
+                json={"runId": "run-straight", "mode": "binary"},
+            )
+            assert started.status_code == 200, started.text
+            session = started.json()
+            assert session["frameCount"] == 8
+            assert session["frames"][0]["role"] == "off"
+            assert session["frames"][1]["lit"] == list(range(60))
+            assert session["frames"][2]["role"] == "bit"
+            assert session["frames"][2]["lit"][0] == 1
+            assert session["outputStart"] == 0
+            _post_state(port, {"bri": 40})
+            assert _get_state(port)["bri"] == 40
+
+            off = client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}",
+                json={"step": 0},
+            )
+            assert off.status_code == 200
+            assert off.json()["shown"] is True
+            dark = _payloads(grabber.collect(0.35))
+            assert dark
+            assert dark[0][:3] == bytes([0, 0, 0])
+            assert dark[0][3:6] == bytes([0, 0, 0])
+
+            lit = client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}",
+                json={"step": 1},
+            )
+            assert lit.json()["role"] == "on"
+            bright = _payloads(grabber.collect(0.35))
+            assert any(packet[:3] == bytes([255, 255, 255]) and packet[177:180] == bytes([255, 255, 255]) for packet in bright)
+
+            bit = client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}",
+                json={"step": 2},
+            )
+            assert bit.json()["bit"] == 0
+            coded = _payloads(grabber.collect(0.35))
+            assert any(packet[:3] == bytes([0, 0, 0]) and packet[3:6] == bytes([255, 255, 255]) for packet in coded)
+
+            assert client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}",
+                json={"step": 99},
+            ).status_code == 400
+            finished = client.post(f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}/finish")
+            assert finished.status_code == 200
+            assert finished.json()["restored"] is True
+            assert _get_state(port)["bri"] == 128
+            assert client.get("/api/mapper/status").json()["detect"] is None
+            assert client.post(
+                f"/api/mapper/fixtures/{STRAIGHT['id']}/detect/{session['sessionId']}",
+                json={"step": 0},
+            ).status_code == 404
+    finally:
+        grabber.close()
+        stop_mock(server)
+
+
+def test_detect_adds_the_output_start_for_each_run(tmp_path):
+    spec = MockSpec(
+        mac="aabbccddee11",
+        name="Quad",
+        mdns="quad",
+        arch="esp32",
+        release="Dig-Quad",
+        version="0.15.1",
+        leds=100,
+    )
+    server, port = start_mock(spec)
+    grabber = PacketGrabber()
+    app = _app(tmp_path)
+    try:
+        with TestClient(app) as client:
+            app.state.mapper.ddp_port = grabber.port
+            mac = "aa:bb:cc:dd:ee:11"
+            _device(app, mac, port=port, leds=100)
+            cfg = {
+                "hw": {
+                    "led": {
+                        "total": 100,
+                        "ins": [
+                            {"start": 0, "len": 60, "pin": [16], "order": 0},
+                            {"start": 60, "len": 40, "pin": [2], "order": 0},
+                        ],
+                    }
+                }
+            }
+            BackupStore(app.state.fleet.db, tmp_path).save(
+                mac,
+                json.dumps(cfg).encode(),
+                b"{}",
+                {"ver": "0.15.0", "name": "Quad", "leds": {"count": 100}},
+                "test",
+                5,
+            )
+            fixture = {
+                "schemaVersion": 1,
+                "id": "detect-output",
+                "name": "Second output",
+                "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
+                "surfaceHint": "freeform",
+                "waypoints": [
+                    {"id": "out-a", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": None},
+                    {"id": "out-b", "position": [0, 1, 0], "source": "typed", "confidence": 1, "label": None},
+                ],
+                "runs": [
+                    {
+                        "id": "run-out",
+                        "controllerId": mac,
+                        "outputIndex": 1,
+                        "startIndex": 0,
+                        "pixelCount": 3,
+                        "pitchMm": 1000 / 3,
+                        "colorOrder": "GRB",
+                        "segments": [
+                            {"id": "seg-out", "kind": "straight", "waypointIds": ["out-a", "out-b"], "params": {}}
+                        ],
+                    }
+                ],
+            }
+            assert client.post("/api/mapper/fixtures", json=fixture).status_code == 200
+            started = client.post(
+                "/api/mapper/fixtures/detect-output/detect",
+                json={"runId": "run-out", "mode": "sequential"},
+            )
+            assert started.status_code == 200, started.text
+            session = started.json()
+            assert session["outputStart"] == 60
+            assert session["frameCount"] == 5
+            assert session["indices"] == [0, 1, 2]
+            shown = client.post(
+                f"/api/mapper/fixtures/detect-output/detect/{session['sessionId']}",
+                json={"step": 2},
+            )
+            assert shown.json()["role"] == "single"
+            assert shown.json()["lit"] == [0]
+            packets = _payloads(grabber.collect(0.35))
+            assert packets
+            assert packets[0][0:3] == bytes([0, 0, 0])
+            assert packets[0][180:189] == bytes([255, 255, 255, 0, 0, 0, 0, 0, 0])
+            assert client.post(f"/api/mapper/fixtures/detect-output/detect/{session['sessionId']}/finish").json()["restored"] is True
+    finally:
+        grabber.close()
+        stop_mock(server)
+
+
+def _payloads(packets: list[bytes]) -> list[bytes]:
+    return [packet[10:] for packet in packets if len(packet) > 10]
+
+
+def _get_state(port: int) -> dict:
+    import urllib.request
+
+    with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/state", timeout=3) as response:
+        body = json.loads(response.read().decode())
+    return body
+
+
+def _post_state(port: int, payload: dict) -> None:
+    import urllib.request
+
+    data = json.dumps(payload).encode()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{port}/json/state",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=3):
+        return
+
+
 def test_ledmap_requires_confirm_then_reboots_and_reads_back(tmp_path):
     spec = MockSpec(
         mac="aabbccddee02",

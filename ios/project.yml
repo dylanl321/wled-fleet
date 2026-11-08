@@ -34,7 +34,7 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: WLED Mapper
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
-        INFOPLIST_KEY_NSCameraUsageDescription: WLED Mapper uses the camera to place the path of each LED strip.
+        INFOPLIST_KEY_NSCameraUsageDescription: WLED Mapper uses the camera to place the path of each LED strip and to find each pixel in the dark.
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: WLED Mapper finds the WLED Fleet server on your home network.
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         CODE_SIGN_STYLE: Automatic

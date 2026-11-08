@@ -4,6 +4,17 @@
   "name": "Detected pixel",
   "origin": {"position": [0, 0, 0], "orientation": [0, 0, 0, 1]},
   "surfaceHint": "freeform",
+  "pixelCorrections": [
+    {
+      "id": "corr-3",
+      "runId": "run-detected",
+      "index": 3,
+      "position": [0.04, 0.05, 0.01],
+      "confidence": 1,
+      "method": "segment",
+      "viewpoints": 1
+    }
+  ],
   "waypoints": [
     {"id": "66666666-6666-4666-8666-000000000001", "position": [0, 0, 0], "source": "typed", "confidence": 1, "label": "Start"},
     {"id": "66666666-6666-4666-8666-000000000002", "position": [0, 1, 0], "source": "typed", "confidence": 1, "label": "End"}
@@ -17,9 +28,6 @@
       "pixelCount": 60,
       "pitchMm": 16.666666666666668,
       "colorOrder": "GRB",
-      "pixelCorrections": [
-        {"index": 3, "position": [0.04, 0.05, 0.01], "source": "detected"}
-      ],
       "segments": [
         {
           "id": "seg-detected",

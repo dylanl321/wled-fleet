@@ -9,16 +9,16 @@ from fastapi.testclient import TestClient
 
 from app.mapper.align import align_points, distribute_drift
 from app.mapper.compile import compile_fixture
-from app.mapper.detect import (
-    brightest_blobs,
-    decode_bits,
-    decode_stationary,
-    detection_plan,
-    frame_count,
-    is_dark,
-    missing_indices,
+from app.mapper.detect_math import (
+    CameraIntrinsics,
+    CameraPose,
+    bit_width,
+    code_frames,
+    ddp_index,
+    Ray,
     ray_from_pixel,
-    refine_with_model,
+    refine_on_model,
+    room_brightness,
     triangulate,
 )
 from app.mapper.effects import effect_colors
@@ -51,42 +51,34 @@ def test_phase_fixtures_compile():
     assert abs(detected[2].x) < 1e-9
 
 
-def test_binary_plan_and_stationary_decode():
-    assert frame_count(60) == 6
-    assert frame_count(1) == 1
-    plan = detection_plan(4, "binary")
-    assert plan == [[1, 3], [2, 3]]
-    assert detection_plan(3, "single") == [[0], [1], [2]]
-    assert decode_bits([True, False, True]) == 5
-    frames = [
-        [(10.0, 10.0), (40.0, 10.0)],
-        [(20.0, 10.0), (40.0, 12.0)],
-    ]
-    found = {item["index"]: item for item in decode_stationary(frames, join=8)}
-    assert set(found) == {1, 2, 3}
-    assert abs(found[3]["u"] - 40) < 1e-6
-    assert abs(found[3]["v"] - 11) < 1e-6
-    assert missing_indices(4, set(found)) == [0]
-    assert is_dark(12) is True
-    assert is_dark(80) is False
-    image = [0.0] * 25
-    image[2] = 200
-    image[22] = 180
-    blobs = brightest_blobs(image, 5, 5, threshold=40, limit=4, radius=1)
-    assert blobs == [(2.0, 0.0), (2.0, 4.0)]
+def test_binary_plan_and_dark_room():
+    assert bit_width(60) == 6
+    assert bit_width(1) == 0
+    frames = code_frames([0, 1, 2, 3], "binary")
+    bits = [frame for frame in frames if frame["role"] == "bit"]
+    assert bits[0]["lit"] == [1, 3]
+    assert bits[1]["lit"] == [2, 3]
+    singles = code_frames([0, 1, 2], "sequential")
+    assert [frame["lit"] for frame in singles if frame["role"] == "single"] == [[0], [1], [2]]
+    assert ddp_index(4, 100) == 104
+    assert room_brightness([12] * 20).dark is True
+    assert room_brightness([80] * 20).dark is False
 
 
 def test_ray_refine_and_triangulate():
-    origin, direction = ray_from_pixel(100, 50, intrinsics={"fx": 200, "fy": 200, "cx": 100, "cy": 50}, pose=IDENTITY)
-    assert abs(direction.x) < 1e-9
-    assert abs(direction.y) < 1e-9
-    assert direction.z < 0
-    point = refine_with_model(origin, direction, [(Vec3(0, 0, -2), Vec3(0, 1, -2))])
-    assert point is not None
-    assert abs(point.z + 2) < 1e-6
-    assert refine_with_model(origin, direction, [(Vec3(1, 0, -2), Vec3(1, 1, -2))], limit=0.05) is None
-    hit = triangulate(Vec3(0, 0, 0), Vec3(0, 0, -1), Vec3(1, 0, -1), Vec3(-1, 0, 0))
-    assert abs(hit.x) < 1e-6 and abs(hit.y) < 1e-6 and abs(hit.z + 1) < 1e-6
+    pose = CameraPose(Vec3(1, 0, 0), Vec3(0, 1, 0), Vec3(0, 0, 1), Vec3(0, 0, 0))
+    lens = CameraIntrinsics(200, 200, 100, 50)
+    ray = ray_from_pixel(100, 50, lens, pose)
+    assert abs(ray.direction.x) < 1e-6
+    assert ray.direction.z < 0
+    hit = refine_on_model(ray, [("seg", Vec3(0, 0, -2)), ("seg", Vec3(0, 1, -2))], 0.05)
+    assert hit is not None
+    assert abs(hit.position.z + 2) < 1e-6
+    assert refine_on_model(ray, [("seg", Vec3(1, 0, -2)), ("seg", Vec3(1, 1, -2))], 0.05) is None
+    side = Ray(Vec3(1, 0, -1), Vec3(-1, 0, 0))
+    found = triangulate(ray, side)
+    assert found is not None
+    assert abs(found.position.x) < 1e-6 and abs(found.position.z + 1) < 1e-6
 
 
 def test_import_round_trip_and_polyline():
@@ -142,29 +134,9 @@ def test_detect_import_and_align_routes(tmp_path):
     straight = load("straight-1m.json")
     with TestClient(app) as client:
         assert client.post("/api/mapper/fixtures", json=straight).status_code == 200
-        bright = client.post(f"/api/mapper/fixtures/{straight['id']}/detect/plan", json={"luma": 90})
-        assert bright.status_code == 400
-        plan = client.post(f"/api/mapper/fixtures/{straight['id']}/detect/plan", json={"mode": "binary", "luma": 10})
-        assert plan.status_code == 200
-        body = plan.json()
-        assert body["pixelCount"] == 60
-        assert len(body["frames"]) == 6
-        shown = client.post(
-            f"/api/mapper/fixtures/{straight['id']}/detect/frame",
-            json={"pixels": body["frames"][0]},
-        )
-        assert shown.status_code == 200
-        assert shown.json()["lit"] == len(body["frames"][0])
-        accepted = client.post(
-            f"/api/mapper/fixtures/{straight['id']}/detect/accept",
-            json={"corrections": [{"ordinal": 4, "position": [0.02, 0.07, 0]}], "seen": [0, 1, 2]},
-        )
-        assert accepted.status_code == 200
-        saved = accepted.json()
-        assert saved["detection"]["needsViewpoint"] is True
-        assert 4 in saved["detection"]["missing"]
-        pixel = next(item for item in client.get(f"/api/mapper/fixtures/{straight['id']}/pixelmap").json()["pixels"] if item["index"] == 4)
-        assert abs(pixel["x"] - 0.02) < 1e-9
+        missing = client.post(f"/api/mapper/fixtures/{straight['id']}/detect", json={})
+        assert missing.status_code == 400
+        assert ddp_index(0, 120) == 120
         csv_body = client.get(f"/api/mapper/fixtures/{straight['id']}/export?format=csv").text
         imported = client.post("/api/mapper/import", json={"filename": "from.csv", "name": "From csv", "text": csv_body})
         assert imported.status_code == 200

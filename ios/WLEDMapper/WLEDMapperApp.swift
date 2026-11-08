@@ -19,7 +19,7 @@ enum Route: Hashable {
     case fixture(String)
     case capture(String)
     case numbers(String)
-    case detect(String)
+    case find(String)
 }
 
 struct RootView: View {
@@ -40,8 +40,8 @@ struct RootView: View {
                                 model.replace(updated)
                             }
                         }
-                    case .detect(let id):
-                        DetectScreen(fixtureId: id)
+                    case .find(let id):
+                        FindScreen(fixtureId: id)
                     }
                 }
         }
@@ -62,7 +62,7 @@ struct RootView: View {
                 EditFixtureSheet(fixture: fixture) { _ in }
             }
         case .detect:
-            DetectScreen(fixtureId: AppModel.straightFixtureId, previewOnly: true)
+            FindScreen(fixtureId: AppModel.straightFixtureId)
         case nil:
             if model.connected || !model.fixtures.isEmpty {
                 FixtureListView()

@@ -64,6 +64,8 @@ Open the same fixture later and the phone tries the saved scan first. If it find
 
 From the fixture screen you can orbit the pixels, run Fill, Rainbow, or Spin. A tree also has **Chase**, which runs out from the trunk along every branch at once. The **All** menu limits an effect to the trunk, every branch, or one branch. The slider button hides **At a height** and **Along the branch**. The server streams the effect, and the preview plays the same one. You can send a ledmap, or share CSV, JSON, Pixelblaze, or xLights. Sending a ledmap asks first. It reboots that one controller.
 
+**Find every pixel** checks a saved fixture in the dark. The server turns the run's pixels off, then on, then in groups, and waits for the phone between each picture. The phone reads the bright spot, works out which pixel it was, and lays that ray onto the tapped path. Lights that were hidden get a second viewpoint. Dead pixels stay marked instead of being invented. Keep these writes a measured position per pixel. Replace the path saves detected waypoints instead. The details sheet switches to one pixel at a time, which is slower and easier to follow.
+
 ## Geometry package
 
 `ios/MapperGeometry` is a Swift package with the same placement math as the Python server. It builds on Linux and on the phone.

@@ -83,6 +83,20 @@ def mount_mapper(app) -> None:
     async def scale_pitch(fixture_id: str, run_id: str, request: Request) -> dict:
         return mapper_of(request).scale_pitch(fixture_id, run_id)
 
+    @router.post("/fixtures/{fixture_id}/detect")
+    async def begin_detect(fixture_id: str, request: Request) -> dict:
+        body = await _body(request)
+        return await mapper_of(request).begin_detect(fixture_id, body.get("runId"), body.get("mode") or "binary")
+
+    @router.post("/fixtures/{fixture_id}/detect/{session_id}/finish")
+    async def finish_detect(fixture_id: str, session_id: str, request: Request) -> dict:
+        return await mapper_of(request).finish_detect(fixture_id, session_id)
+
+    @router.post("/fixtures/{fixture_id}/detect/{session_id}")
+    async def step_detect(fixture_id: str, session_id: str, request: Request) -> dict:
+        body = await _body(request)
+        return await mapper_of(request).step_detect(fixture_id, session_id, body.get("step"))
+
     @router.post("/fixtures/{fixture_id}/highlight")
     async def highlight(fixture_id: str, request: Request) -> dict:
         body = await _body(request)
@@ -113,38 +127,6 @@ def mount_mapper(app) -> None:
     @router.post("/fixtures/{fixture_id}/ledmap")
     async def ledmap(fixture_id: str, request: Request) -> dict:
         return await mapper_of(request).push_ledmap(fixture_id, await _body(request))
-
-    @router.post("/fixtures/{fixture_id}/detect/plan")
-    async def detect_plan(fixture_id: str, request: Request) -> dict:
-        body = await _optional_body(request)
-        mode = body.get("mode") or "binary"
-        if not isinstance(mode, str):
-            raise HTTPException(status_code=400, detail="mode must be binary or single")
-        luma = body.get("luma")
-        if luma is not None and not isinstance(luma, (int, float)):
-            raise HTTPException(status_code=400, detail="luma must be a number")
-        return mapper_of(request).detection_plan(fixture_id, mode, None if luma is None else float(luma))
-
-    @router.post("/fixtures/{fixture_id}/detect/frame")
-    async def detect_frame(fixture_id: str, request: Request) -> dict:
-        body = await _body(request)
-        pixels = body.get("pixels")
-        if not isinstance(pixels, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in pixels):
-            raise HTTPException(status_code=400, detail="pixels must be a list of indexes")
-        return await mapper_of(request).show_detection(fixture_id, pixels)
-
-    @router.post("/fixtures/{fixture_id}/detect/accept")
-    async def detect_accept(fixture_id: str, request: Request) -> dict:
-        body = await _body(request)
-        corrections = body.get("corrections")
-        if not isinstance(corrections, list):
-            raise HTTPException(status_code=400, detail="corrections must be a list")
-        seen = body.get("seen")
-        if seen is not None and (
-            not isinstance(seen, list) or not all(isinstance(item, int) and not isinstance(item, bool) for item in seen)
-        ):
-            raise HTTPException(status_code=400, detail="seen must be a list of indexes")
-        return mapper_of(request).accept_detection(fixture_id, corrections, seen)
 
     @router.get("/fixtures/{fixture_id}/export")
     async def export(fixture_id: str, request: Request) -> Response:

@@ -161,26 +161,15 @@ final class GeometryTests: XCTestCase {
     }
 
     func testDetectionRaysAlignmentAndBranches() throws {
-        XCTAssertEqual(frameCount(60), 6)
-        XCTAssertEqual(detectionFrames(4, mode: "binary"), [[1, 3], [2, 3]])
-        XCTAssertEqual(decodeBits([true, false, true]), 5)
-        let frames = [
-            [ImageBlob(10, 10), ImageBlob(40, 10)],
-            [ImageBlob(20, 10), ImageBlob(40, 12)],
-        ]
-        let found = Dictionary(uniqueKeysWithValues: decodeStationary(frames, join: 8).map { ($0.index, $0) })
-        XCTAssertEqual(Set(found.keys), [1, 2, 3])
-        assertClose(found[3]!.v, 11)
-        XCTAssertEqual(missingIndices(4, seen: Set(found.keys)), [0])
-        XCTAssertEqual(brightestBlobs([0, 0, 200, 0, 0] + Array(repeating: 0, count: 15) + [0, 0, 180, 0, 0], width: 5, height: 5, threshold: 40, limit: 4, radius: 1).count, 2)
-        let identity = [[1.0, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
-        let ray = rayFromPixel(u: 100, v: 50, fx: 200, fy: 200, cx: 100, cy: 50, pose: identity)
+        XCTAssertEqual(bitWidth(60), 6)
+        let bits = codeFrames(indices: [0, 1, 2, 3], mode: .binary).filter { $0.role == .bit }
+        XCTAssertEqual(bits.first?.lit, [1, 3])
+        let pose = CameraPose(right: Vec3(1, 0, 0), up: Vec3(0, 1, 0), back: Vec3(0, 0, 1), origin: .zero)
+        let ray = rayFromPixel(u: 100, v: 50, intrinsics: CameraIntrinsics(fx: 200, fy: 200, cx: 100, cy: 50), pose: pose)
         assertClose(ray.direction.x, 0)
         XCTAssertLessThan(ray.direction.z, 0)
-        let point = refineWithModel(origin: ray.origin, direction: ray.direction, segments: [(Vec3(0, 0, -2), Vec3(0, 1, -2))])
-        assertClose(point?.z ?? 99, -2)
-        let hit = triangulate(originA: .zero, directionA: Vec3(0, 0, -1), originB: Vec3(1, 0, -1), directionB: Vec3(-1, 0, 0))
-        assertClose(hit.z, -1)
+        let hit = triangulate(ray, Ray(origin: Vec3(1, 0, -1), direction: Vec3(-1, 0, 0)))
+        assertClose(hit?.position.z ?? 99, -1)
         let closed = try distributeDrift([.zero, Vec3(0, 1, 0), Vec3(0.3, 2, 0)], retap: Vec3(0.3, 2, 0))
         assertClose(closed.corrected[2].x, 0)
         let aligned = try alignSessions([.zero, Vec3(0, 0, 1)], [Vec3(1, 0, 0), Vec3(2, 0, 0)])

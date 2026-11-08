@@ -197,31 +197,7 @@ def compile_run(fixture_name: str, run: dict, waypoints: dict[str, dict]) -> lis
             ordinal += 1
             index += 1
         cursor = segment_end
-    return _apply_corrections(pixels, run)
-
-
-def _apply_corrections(pixels: list[Pixel], run: dict) -> list[Pixel]:
-    raw = run.get("pixelCorrections")
-    if not isinstance(raw, list) or not raw:
-        return pixels
-    found: dict[int, Vec3] = {}
-    for item in raw:
-        if not isinstance(item, dict) or isinstance(item.get("index"), bool) or not isinstance(item.get("index"), int):
-            continue
-        position = item.get("position")
-        if not isinstance(position, list) or len(position) != 3:
-            continue
-        found[item["index"]] = vec3(position)
-    if not found:
-        return pixels
-    corrected: list[Pixel] = []
-    for pixel in pixels:
-        point = found.get(pixel.index)
-        if point is None:
-            corrected.append(pixel)
-            continue
-        corrected.append(replace(pixel, x=point.x, y=point.y, z=point.z))
-    return corrected
+    return pixels
 
 
 def _pitch_ordinal(cursor: float, pitch_m: float) -> int:
@@ -256,7 +232,7 @@ def compile_fixture(fixture: dict) -> list[Pixel]:
     for run in fixture.get("runs") or []:
         if isinstance(run, dict):
             pixels.extend(compile_run(name, run, waypoints))
-    return annotate_groups(fixture, pixels)
+    return annotate_groups(fixture, apply_pixel_corrections(fixture, pixels))
 
 
 def annotate_groups(fixture: dict, pixels: list[Pixel]) -> list[Pixel]:
@@ -316,6 +292,51 @@ def _segment_groups(fixture: dict) -> dict[str, str]:
             segment_group = segment.get("groupId") if isinstance(segment.get("groupId"), str) else ""
             found[segment["id"]] = segment_group or run_group
     return found
+
+
+def apply_pixel_corrections(fixture: dict, pixels: list[Pixel]) -> list[Pixel]:
+    """Measured camera positions override the shape. The path itself stays."""
+    corrections = fixture.get("pixelCorrections")
+    if not isinstance(corrections, list) or not corrections:
+        return pixels
+    runs = [run for run in fixture.get("runs") or [] if isinstance(run, dict)]
+    located: dict[tuple[str, int], list] = {}
+    for item in corrections:
+        if not isinstance(item, dict):
+            continue
+        run_id = item.get("runId")
+        index = item.get("index")
+        position = item.get("position")
+        if not isinstance(run_id, str) or isinstance(index, bool) or not isinstance(index, int):
+            continue
+        if not isinstance(position, list) or len(position) != 3:
+            continue
+        if not all(isinstance(value, (int, float)) and not isinstance(value, bool) for value in position):
+            continue
+        located[(run_id, index)] = position
+    if not located:
+        return pixels
+    updated: list[Pixel] = []
+    for pixel in pixels:
+        run_id = _run_id_for(runs, pixel)
+        position = located.get((run_id, pixel.index)) if run_id else None
+        if position is None:
+            updated.append(pixel)
+            continue
+        updated.append(replace(pixel, x=float(position[0]), y=float(position[1]), z=float(position[2])))
+    return updated
+
+
+def _run_id_for(runs: list[dict], pixel: Pixel) -> str | None:
+    for run in runs:
+        if str(run.get("controllerId") or "") != pixel.controller:
+            continue
+        if int(run.get("outputIndex") or 0) != pixel.output:
+            continue
+        segments = run.get("segments") if isinstance(run.get("segments"), list) else []
+        if any(isinstance(segment, dict) and segment.get("id") == pixel.segment for segment in segments):
+            return str(run.get("id") or "")
+    return None
 
 
 def validate_counts(fixture: dict, pixels: list[Pixel] | None = None) -> list[dict]:

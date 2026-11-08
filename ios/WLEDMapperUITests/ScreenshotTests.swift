@@ -39,7 +39,7 @@ final class ScreenshotTests: XCTestCase {
         case "numbers":
             marker = app.staticTexts["Points"]
         case "detect":
-            marker = app.staticTexts["Find pixels"]
+            marker = app.staticTexts["Find every pixel"]
         default:
             marker = app.staticTexts["Front tree"]
         }

@@ -15,7 +15,7 @@ public func compile(_ fixture: Fixture) throws -> [MappedPixel] {
     for run in fixture.runs {
         pixels.append(contentsOf: try compileRun(fixture.name, run, index))
     }
-    return annotateGroups(fixture, pixels)
+    return annotateGroups(fixture, applyPixelCorrections(pixels, fixture))
 }
 
 private func annotateGroups(_ fixture: Fixture, _ pixels: [MappedPixel]) -> [MappedPixel] {
@@ -70,6 +70,23 @@ private func annotateGroups(_ fixture: Fixture, _ pixels: [MappedPixel]) -> [Map
         }
     }
     return annotated
+}
+
+func applyPixelCorrections(_ pixels: [MappedPixel], _ fixture: Fixture) -> [MappedPixel] {
+    guard !fixture.pixelCorrections.isEmpty else { return pixels }
+    let located = Dictionary(fixture.pixelCorrections.map { ("\($0.runId):\($0.index)", $0) }, uniquingKeysWith: { _, latest in latest })
+    return pixels.map { pixel in
+        guard let run = fixture.runs.first(where: { run in
+            run.controllerId == pixel.controller
+                && run.outputIndex == pixel.output
+                && run.segments.contains { $0.id == pixel.segment }
+        }), let fix = located["\(run.id):\(pixel.index)"] else { return pixel }
+        var moved = pixel
+        moved.x = fix.position.x
+        moved.y = fix.position.y
+        moved.z = fix.position.z
+        return moved
+    }
 }
 
 public func validateCounts(_ fixture: Fixture, pixels: [MappedPixel]? = nil) throws -> [RunReport] {
@@ -151,19 +168,7 @@ private func compileRun(_ name: String, _ run: Run, _ waypoints: [String: Waypoi
         }
         cursor = segmentEnd
     }
-    return applyCorrections(pixels, run)
-}
-
-private func applyCorrections(_ pixels: [MappedPixel], _ run: Run) -> [MappedPixel] {
-    guard let corrections = run.pixelCorrections, !corrections.isEmpty else { return pixels }
-    let found = Dictionary(uniqueKeysWithValues: corrections.map { ($0.index, $0.position) })
-    return pixels.map { pixel in
-        guard let point = found[pixel.index] else { return pixel }
-        return MappedPixel(
-            fixture: pixel.fixture, controller: pixel.controller, output: pixel.output, index: pixel.index,
-            x: point.x, y: point.y, z: point.z, segment: pixel.segment, u: pixel.u
-        )
-    }
+    return pixels
 }
 
 private func pitchOrdinal(_ cursor: Double, _ pitch: Double) -> Int {
