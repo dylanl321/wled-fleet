@@ -176,6 +176,22 @@ struct FixtureScreen: View {
         }
     }
 
+    private func scalePitches() async {
+        guard let fixture else { return }
+        do {
+            var latest = fixture
+            for run in fixture.runs {
+                latest = try await model.client.scalePitch(fixture: fixture.id, run: run.id)
+            }
+            model.replace(latest)
+            if let local = try? compile(latest) { pixels = local }
+            Haptics.success()
+        } catch {
+            model.message = error.localizedDescription
+            Haptics.warning()
+        }
+    }
+
     private func push(_ mode: String) async {
         do {
             try await model.client.ledmap(fixture: fixtureId, slot: model.ledmapSlot, mode: mode, width: model.gridWidth, height: model.gridHeight)
@@ -208,7 +224,12 @@ struct FixtureScreen: View {
                     .foregroundStyle(Theme.ink)
                 Stepper("Grid height \(model.gridHeight)", value: $model.gridHeight, in: 1...128)
                     .foregroundStyle(Theme.ink)
-                Text("A ledmap is only for a fixture on one controller. Upload reboots that board.")
+                Button("Scale pitch to the controller count") {
+                    Task { await scalePitches() }
+                }
+                .font(.body.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                Text("A ledmap is only for a fixture on one controller. Upload reboots that board. Scaling the pitch, or setting a span's pixel count while capturing, fixes a count that does not match the board.")
                     .font(.callout)
                     .foregroundStyle(Theme.muted)
                 if let message = model.message {

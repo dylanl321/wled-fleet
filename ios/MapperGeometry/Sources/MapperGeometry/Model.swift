@@ -12,6 +12,7 @@ public enum WaypointSource: String, Codable {
     case lidarSnapped
     case typed
     case imported
+    case estimated
 }
 
 public enum SegmentKind: String, Codable, CaseIterable {
@@ -164,16 +165,24 @@ public struct SegmentParams: Equatable, Codable {
     public var radiusStartMm: Double?
     public var radiusEndMm: Double?
     public var handedness: String?
+    public var inward: Vec3?
 
-    public init(turns: Double? = nil, radiusStartMm: Double? = nil, radiusEndMm: Double? = nil, handedness: String? = nil) {
+    public init(
+        turns: Double? = nil,
+        radiusStartMm: Double? = nil,
+        radiusEndMm: Double? = nil,
+        handedness: String? = nil,
+        inward: Vec3? = nil
+    ) {
         self.turns = turns
         self.radiusStartMm = radiusStartMm
         self.radiusEndMm = radiusEndMm
         self.handedness = handedness
+        self.inward = inward
     }
 
     private enum CodingKeys: String, CodingKey {
-        case turns, radiusStartMm, radiusEndMm, handedness
+        case turns, radiusStartMm, radiusEndMm, handedness, inward
     }
 
     public init(from decoder: Decoder) throws {
@@ -182,6 +191,7 @@ public struct SegmentParams: Equatable, Codable {
         radiusStartMm = try container.decodeIfPresent(Double.self, forKey: .radiusStartMm)
         radiusEndMm = try container.decodeIfPresent(Double.self, forKey: .radiusEndMm)
         handedness = try container.decodeIfPresent(String.self, forKey: .handedness)
+        inward = try container.decodeIfPresent(Vec3.self, forKey: .inward)
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -190,6 +200,7 @@ public struct SegmentParams: Equatable, Codable {
         if let radiusStartMm { try container.encode(radiusStartMm, forKey: .radiusStartMm) }
         if let radiusEndMm { try container.encode(radiusEndMm, forKey: .radiusEndMm) }
         if let handedness { try container.encode(handedness, forKey: .handedness) }
+        if let inward { try container.encode(inward, forKey: .inward) }
     }
 }
 

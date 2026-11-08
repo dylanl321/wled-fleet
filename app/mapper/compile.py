@@ -73,25 +73,35 @@ def points_for(segment: dict, waypoints: dict[str, dict]) -> list[Vec3]:
 def _helix_args(segment: dict, points: list[Vec3]) -> tuple[Vec3, Vec3, float, float, float, str, Vec3 | None]:
     params = segment.get("params") if isinstance(segment.get("params"), dict) else {}
     handedness = params.get("handedness") if params.get("handedness") in {"cw", "ccw"} else "ccw"
-    has_explicit = all(key in params for key in ("turns", "radiusStartMm", "radiusEndMm"))
-    if has_explicit:
-        turns = float(params["turns"])
-        radius_start = float(params["radiusStartMm"]) / 1000.0
-        radius_end = float(params["radiusEndMm"]) / 1000.0
-        hint = None
-        if len(points) >= 3:
-            hint = points[1] - points[0]
-        return points[0], points[-1], radius_start, radius_end, turns, handedness, hint
-    fitted = fit_helix(points)
-    return (
-        fitted.axis_start,
-        fitted.axis_end,
-        fitted.radius_start_m,
-        fitted.radius_end_m,
-        fitted.turns,
-        handedness,
-        points[1] - points[0] if len(points) >= 3 else None,
-    )
+    radius_start = float(params["radiusStartMm"]) / 1000.0 if "radiusStartMm" in params else None
+    radius_end = float(params["radiusEndMm"]) / 1000.0 if "radiusEndMm" in params else radius_start
+    inward = vec3(params["inward"]) if isinstance(params.get("inward"), list) and len(params["inward"]) == 3 else None
+    # Two stored points are the axis ends. Three or more are surface taps, one per turn.
+    if len(points) >= 3:
+        fitted = fit_helix(points, radius_m=radius_start, inward=inward)
+        hint = points[0] - fitted.axis_start
+        return (
+            fitted.axis_start,
+            fitted.axis_end,
+            radius_start if radius_start is not None else fitted.radius_start_m,
+            radius_end if radius_end is not None else fitted.radius_end_m,
+            fitted.turns,
+            handedness,
+            hint,
+        )
+    if radius_start is None:
+        fitted = fit_helix(points)
+        return (
+            fitted.axis_start,
+            fitted.axis_end,
+            fitted.radius_start_m,
+            fitted.radius_end_m,
+            float(params["turns"]) if "turns" in params else fitted.turns,
+            handedness,
+            None,
+        )
+    turns = float(params["turns"]) if "turns" in params else 1.0
+    return points[0], points[-1], radius_start, radius_end if radius_end is not None else radius_start, turns, handedness, None
 
 
 def segment_length(segment: dict, points: list[Vec3]) -> float:

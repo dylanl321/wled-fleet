@@ -10,6 +10,7 @@ struct CaptureScreen: View {
     var fixtureId: String
     @StateObject private var capture = CaptureModel()
     @State private var showNudge = false
+    @State private var showAdjust = false
 
     var body: some View {
         ZStack {
@@ -23,6 +24,13 @@ struct CaptureScreen: View {
                 shapes
                 if capture.shape == .helix { helixBar }
                 if showNudge { nudgeBar }
+                if let notice = capture.notice {
+                    Text(notice)
+                        .font(.footnote.weight(.medium))
+                        .foregroundStyle(Theme.warn)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                adjustGroup
                 countLine
                 HStack(spacing: 10) {
                     BigButton(title: "Undo", prominent: false) { capture.undo() }
@@ -97,18 +105,22 @@ struct CaptureScreen: View {
     private var helixBar: some View {
         VStack(spacing: 8) {
             HStack {
-                Text("Turns \(Int(capture.turns))")
+                Text(capture.turnLabel)
                 Spacer()
-                Text(capture.handedness == "ccw" ? "CCW" : "CW")
+                Text(capture.handedness == "ccw" ? "CCW looking up" : "CW looking up")
                 Button(capture.handedness == "ccw" ? "Clockwise" : "Counter") {
                     capture.handedness = capture.handedness == "ccw" ? "cw" : "ccw"
+                    capture.refreshHelixParams()
                 }
             }
             .font(.subheadline.weight(.medium))
             .foregroundStyle(Theme.ink)
             Slider(value: $capture.radiusMm, in: 10...400, step: 1)
                 .tint(Theme.amber)
-            Text("Radius \(Int(capture.radiusMm)) mm · first and last tap are the axis")
+                .onChange(of: capture.radiusMm) { _, _ in
+                    capture.refreshHelixParams()
+                }
+            Text("Tap once per turn, on the same side. Radius \(Int(capture.radiusMm)) mm.")
                 .font(.caption)
                 .foregroundStyle(Theme.muted)
         }
@@ -127,6 +139,32 @@ struct CaptureScreen: View {
                     capture.applyNudge()
                 }
         }
+        .padding(12)
+        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
+    private var adjustGroup: some View {
+        DisclosureGroup("Adjust", isExpanded: $showAdjust) {
+            VStack(alignment: .leading, spacing: 10) {
+                Button("Scale pitch to match the controller") {
+                    capture.scalePitch()
+                    Haptics.success()
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.ink)
+                Stepper(value: Binding(get: { capture.spanOverride }, set: { capture.setSpanOverride($0) }), in: 0...5000) {
+                    Text("This span: \(capture.spanOverride) pixels")
+                        .font(.subheadline)
+                        .foregroundStyle(Theme.ink)
+                }
+                Button("Use the measured count") { capture.clearSpanOverride() }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.muted)
+            }
+            .padding(.top, 8)
+        }
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(Theme.ink)
         .padding(12)
         .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
@@ -177,9 +215,17 @@ struct CaptureScreen: View {
     }
 
     private func place() {
-        guard let sample = capture.session.sample() else { return }
+        guard let sample = capture.session.sample() else {
+            capture.notice = "The camera is not tracking yet."
+            Haptics.warning()
+            return
+        }
         capture.place(sample)
-        Haptics.place()
+        if sample.source == .estimated {
+            Haptics.warning()
+        } else {
+            Haptics.place()
+        }
         guard let run = capture.activeRun, let index = capture.lastIndex else { return }
         Task {
             try? await model.client.highlight(
@@ -218,16 +264,17 @@ struct CaptureScreen: View {
 final class CaptureModel: ObservableObject {
     @Published var fixture = Fixture(id: "draft", name: "Fixture", surfaceHint: .freeform, waypoints: [], runs: [])
     @Published var shape: SegmentKind = .straight
-    @Published var turns = 4.0
     @Published var radiusMm = 80.0
     @Published var handedness = "ccw"
     @Published var nudge = 0.0
     @Published var saving = false
+    @Published var notice: String?
     let session = CaptureSession()
     private var history: [Fixture] = []
     private var active = 0
     private var lastHit: Vec3?
     private var lastCamera: Vec3?
+    private var inward: Vec3?
 
     var activeRun: Run? {
         fixture.runs.indices.contains(active) ? fixture.runs[active] : nil
@@ -256,6 +303,24 @@ final class CaptureModel: ObservableObject {
         }.count) ?? 0
         let expected = activeRun?.pixelCount ?? 0
         return "\(placed) placed · \(expected) on controller"
+    }
+
+    var turnLabel: String {
+        let turns = helixPoints.map { max($0 - 1, 0) } ?? 0
+        return turns == 1 ? "1 turn" : "\(turns) turns"
+    }
+
+    var spanOverride: Int {
+        guard fixture.runs.indices.contains(active), let segment = fixture.runs[active].segments.last else { return 0 }
+        if let value = segment.pixelCountOverride { return value }
+        return (try? compile(fixture).filter { $0.segment == segment.id }.count) ?? 0
+    }
+
+    private var helixPoints: Int? {
+        guard shape == .helix, fixture.runs.indices.contains(active), let segment = fixture.runs[active].segments.last, segment.kind == .helix else {
+            return nil
+        }
+        return segment.waypointIds.count
     }
 
     var countOk: Bool {
@@ -298,6 +363,16 @@ final class CaptureModel: ObservableObject {
         lastHit = sample.position
         lastCamera = sample.camera
         nudge = 0
+        if sample.source == .estimated {
+            notice = "No surface under the reticle. This point is a guess — use Nudge."
+        } else {
+            notice = nil
+        }
+        let flat = sample.position - sample.camera
+        let horizontal = Vec3(flat.x, 0, flat.z)
+        if horizontal.length() > 1e-6 {
+            inward = horizontal.normalized()
+        }
         let stored = storedPosition(sample.position)
         let waypoint = Waypoint(
             id: UUID().uuidString,
@@ -308,10 +383,28 @@ final class CaptureModel: ObservableObject {
         )
         fixture.waypoints.append(waypoint)
         append(waypoint.id)
-        if shape == .helix, session.lidar, let radius = session.trunkRadius(at: sample.position) {
+        if shape == .helix, session.lidar, let radius = session.trunkRadius(at: sample.position, limit: max(0.5, radiusMm / 1000 * 3)) {
             radiusMm = radius
             refreshHelixParams()
         }
+    }
+
+    func scalePitch() {
+        guard fixture.runs.indices.contains(active) else { return }
+        guard let pitch = try? pitchMillimetres(matching: fixture.runs[active], waypoints: fixture.waypoints) else { return }
+        fixture.runs[active].pitchMm = pitch
+    }
+
+    func setSpanOverride(_ count: Int) {
+        guard fixture.runs.indices.contains(active), !fixture.runs[active].segments.isEmpty else { return }
+        let index = fixture.runs[active].segments.count - 1
+        fixture.runs[active].segments[index].pixelCountOverride = count
+    }
+
+    func clearSpanOverride() {
+        guard fixture.runs.indices.contains(active), !fixture.runs[active].segments.isEmpty else { return }
+        let index = fixture.runs[active].segments.count - 1
+        fixture.runs[active].segments[index].pixelCountOverride = nil
     }
 
     func applyNudge() {
@@ -339,7 +432,7 @@ final class CaptureModel: ObservableObject {
         if var last = segments.last, last.waypointIds.count < 2 || (!last.isClosed(for: shape) && last.kind == shape) {
             if last.waypointIds.count < 2 { last.kind = shape }
             last.waypointIds.append(id)
-            last.params = params()
+            last.params = params(points: last.waypointIds.count)
             fixture.runs[active].segments[segments.count - 1] = last
             return
         }
@@ -349,18 +442,27 @@ final class CaptureModel: ObservableObject {
         }
         ids.append(id)
         fixture.runs[active].segments.append(
-            Segment(id: UUID().uuidString, kind: shape, waypointIds: ids, params: params())
+            Segment(id: UUID().uuidString, kind: shape, waypointIds: ids, params: params(points: ids.count))
         )
     }
 
-    private func params() -> SegmentParams {
+    private func params(points: Int) -> SegmentParams {
         guard shape == .helix else { return SegmentParams() }
-        return SegmentParams(turns: turns, radiusStartMm: radiusMm, radiusEndMm: radiusMm, handedness: handedness)
+        return SegmentParams(
+            turns: Double(max(points - 1, 1)),
+            radiusStartMm: radiusMm,
+            radiusEndMm: radiusMm,
+            handedness: handedness,
+            inward: inward
+        )
     }
 
     private func refreshHelixParams() {
-        guard let index = fixture.runs[active].segments.indices.last, fixture.runs[active].segments[index].kind == .helix else { return }
-        fixture.runs[active].segments[index].params = params()
+        guard fixture.runs.indices.contains(active),
+              let index = fixture.runs[active].segments.indices.last,
+              fixture.runs[active].segments[index].kind == .helix else { return }
+        let points = fixture.runs[active].segments[index].waypointIds.count
+        fixture.runs[active].segments[index].params = params(points: points)
     }
 
     func setPitch(_ millimetres: Double) {
@@ -469,12 +571,12 @@ final class CaptureSession: ObservableObject {
         return CaptureSample(
             position: Vec3(Double(dropped.x), Double(dropped.y), Double(dropped.z)),
             camera: camera,
-            confidence: confidence,
-            source: .tapped
+            confidence: min(confidence, 0.2),
+            source: .estimated
         )
     }
 
-    func trunkRadius(at point: Vec3) -> Double? {
+    func trunkRadius(at point: Vec3, limit: Double) -> Double? {
         guard let frame = view?.session.currentFrame else { return nil }
         var samples: [(Double, Double)] = []
         for anchor in frame.anchors {
@@ -486,13 +588,17 @@ final class CaptureSession: ObservableObject {
                 let pointer = base.advanced(by: index * source.stride + source.offset)
                 let local = pointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
                 let world = mesh.transform * SIMD4<Float>(local.x, local.y, local.z, 1)
-                if abs(world.y - Float(point.y)) < 0.05 {
+                let dy = abs(world.y - Float(point.y))
+                let horizontal = hypot(Double(world.x) - point.x, Double(world.z) - point.z)
+                if dy < 0.05 && horizontal <= limit {
                     samples.append((Double(world.x), Double(world.z)))
                 }
                 if samples.count > 400 { break }
             }
         }
-        guard samples.count >= 12, let fit = try? fitCircle(samples) else { return nil }
+        guard let fit = try? robustCircle(samples, near: (point.x, point.z), maxDistance: limit) else { return nil }
+        let centerDistance = hypot(fit.x - point.x, fit.z - point.z)
+        if centerDistance > limit { return nil }
         return fit.radius * 1000
     }
 
@@ -547,9 +653,12 @@ struct CaptureCanvas: UIViewRepresentable {
         for waypoint in waypoints {
             let position = SIMD3<Float>(Float(waypoint.position.x), Float(waypoint.position.y), Float(waypoint.position.z))
             let anchor = AnchorEntity(world: position)
+            let color = waypoint.source == .estimated
+                ? UIColor(red: 0.55, green: 0.62, blue: 0.72, alpha: 1)
+                : UIColor(red: 1, green: 0.74, blue: 0.32, alpha: 1)
             let sphere = ModelEntity(
-                mesh: .generateSphere(radius: 0.012),
-                materials: [SimpleMaterial(color: UIColor(red: 1, green: 0.74, blue: 0.32, alpha: 1), isMetallic: false)]
+                mesh: .generateSphere(radius: waypoint.source == .estimated ? 0.016 : 0.012),
+                materials: [SimpleMaterial(color: color, isMetallic: false)]
             )
             anchor.addChild(sphere)
             view.scene.addAnchor(anchor)

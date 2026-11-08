@@ -170,12 +170,21 @@ public struct HelixFit: Equatable {
     public var radii: [Double]
 }
 
-public func fitHelix(_ taps: [Vec3]) throws -> HelixFit {
+public func fitHelix(_ taps: [Vec3], radius: Double? = nil, inward: Vec3? = nil) throws -> HelixFit {
     if taps.count < 2 { throw GeometryError("A helix fit needs at least two taps.") }
     let axis = helixAxis(taps)
-    let start = projectToLine(taps[0], axis.center, axis.direction)
-    let end = projectToLine(taps[taps.count - 1], axis.center, axis.direction)
-    let radii = taps.map { distance($0, projectToLine($0, axis.center, axis.direction)) }
+    var start = projectToLine(taps[0], axis.center, axis.direction)
+    var end = projectToLine(taps[taps.count - 1], axis.center, axis.direction)
+    let measured = taps.map { distance($0, projectToLine($0, axis.center, axis.direction)) }
+    let radii: [Double]
+    if let radius, radius > 1e-6 {
+        let offset = inwardUnit(axis.direction, inward) * radius
+        start = start + offset
+        end = end + offset
+        radii = Array(repeating: radius, count: taps.count)
+    } else {
+        radii = measured
+    }
     return HelixFit(
         axisStart: start,
         axisEnd: end,
@@ -184,6 +193,21 @@ public func fitHelix(_ taps: [Vec3]) throws -> HelixFit {
         turns: Double(taps.count - 1),
         radii: radii
     )
+}
+
+private func inwardUnit(_ axisDirection: Vec3, _ inward: Vec3?) -> Vec3 {
+    let axis = axisDirection.normalized()
+    if let inward {
+        let flat = inward - axis * inward.dot(axis)
+        if flat.length() > 1e-6 { return flat.normalized() }
+    }
+    var helper = Vec3(1, 0, 0)
+    var flat = helper - axis * helper.dot(axis)
+    if flat.length() < 1e-6 {
+        helper = Vec3(0, 0, 1)
+        flat = helper - axis * helper.dot(axis)
+    }
+    return flat.normalized()
 }
 
 private func helixAxis(_ taps: [Vec3]) -> (center: Vec3, direction: Vec3) {
@@ -270,6 +294,19 @@ private func solve3(_ matrix: [[Double]], _ vector: [Double]) -> [Double]? {
         }
     }
     return [rows[0][3], rows[1][3], rows[2][3]]
+}
+
+public func robustCircle(_ points: [(Double, Double)], near: (Double, Double)? = nil, maxDistance: Double = 0.5) throws -> (x: Double, z: Double, radius: Double) {
+    var chosen = points
+    if let near {
+        chosen = chosen.filter { hypot($0.0 - near.0, $0.1 - near.1) <= maxDistance }
+    }
+    if chosen.count < 8 { throw GeometryError("Not enough points near the trunk.") }
+    let first = try fitCircle(chosen)
+    let band = max(0.04, 0.3 * first.radius)
+    let kept = chosen.filter { abs(hypot($0.0 - first.x, $0.1 - first.z) - first.radius) <= band }
+    if kept.count < 8 { throw GeometryError("The ring is too messy to trust.") }
+    return try fitCircle(kept)
 }
 
 public func nudgeTowardCamera(hit: Vec3, camera: Vec3, meters: Double) -> Vec3 {

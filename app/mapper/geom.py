@@ -262,20 +262,28 @@ class HelixFit:
     radii_m: tuple[float, ...]
 
 
-def fit_helix(taps: list[Vec3]) -> HelixFit:
-    """Fit an axis through the taps and read a radius from each tap.
+def fit_helix(taps: list[Vec3], radius_m: float | None = None, inward: Vec3 | None = None) -> HelixFit:
+    """Fit a helix to taps made once per turn, on the same side of the trunk.
 
-    An upright trunk uses a vertical axis through the taps' (x, z) centroid,
-    which is the base-to-top fit. A line of taps on one side of that axis has
-    radius zero, so pass radiusStartMm when the phone only saw one face.
-    Anything that is not clearly vertical uses a least-squares line.
+    The axis direction is vertical for an upright trunk, otherwise the
+    least-squares line through the taps. Turns are the tap count minus one.
+    A supplied radius shifts that axis into the trunk so the taps sit on the
+    surface; without it, one-sided taps measure a radius of about zero because
+    the line runs through them.
     """
     if len(taps) < 2:
         raise ValueError("A helix fit needs at least two taps.")
     center, direction = _helix_axis(taps)
     start = project_to_line(taps[0], center, direction)
     end = project_to_line(taps[-1], center, direction)
-    radii = tuple(distance(tap, project_to_line(tap, center, direction)) for tap in taps)
+    measured = tuple(distance(tap, project_to_line(tap, center, direction)) for tap in taps)
+    if radius_m is not None and radius_m > 1e-6:
+        offset = _inward_unit(direction, inward) * float(radius_m)
+        start = start + offset
+        end = end + offset
+        radii = tuple(float(radius_m) for _ in taps)
+    else:
+        radii = measured
     return HelixFit(
         axis_start=start,
         axis_end=end,
@@ -284,6 +292,20 @@ def fit_helix(taps: list[Vec3]) -> HelixFit:
         turns=float(len(taps) - 1),
         radii_m=radii,
     )
+
+
+def _inward_unit(axis_direction: Vec3, inward: Vec3 | None) -> Vec3:
+    axis = axis_direction.normalized()
+    if inward is not None:
+        flat = inward - axis * inward.dot(axis)
+        if flat.length() > 1e-6:
+            return flat.normalized()
+    helper = Vec3(1.0, 0.0, 0.0)
+    flat = helper - axis * helper.dot(axis)
+    if flat.length() < 1e-6:
+        helper = Vec3(0.0, 0.0, 1.0)
+        flat = helper - axis * helper.dot(axis)
+    return flat.normalized()
 
 
 def _helix_axis(taps: list[Vec3]) -> tuple[Vec3, Vec3]:
@@ -348,6 +370,38 @@ def _solve3(matrix: list[list[float]], vector: list[float]) -> list[float] | Non
             factor = rows[row][column]
             rows[row] = [value - factor * base for value, base in zip(rows[row], rows[column])]
     return [rows[0][3], rows[1][3], rows[2][3]]
+
+
+def robust_circle(
+    points_xz: list[tuple[float, float]],
+    near: tuple[float, float] | None = None,
+    max_distance: float = 0.5,
+) -> tuple[float, float, float]:
+    """Circle fit that ignores a wall or fence sitting at the same height.
+
+    Points farther than max_distance from `near` are dropped, then points that
+    disagree with the fitted radius are dropped and the circle is fit again.
+    """
+    chosen = list(points_xz)
+    if near is not None:
+        origin_x, origin_z = near
+        chosen = [
+            point
+            for point in chosen
+            if math.hypot(point[0] - origin_x, point[1] - origin_z) <= max_distance
+        ]
+    if len(chosen) < 8:
+        raise ValueError("Not enough points near the trunk.")
+    center_x, center_z, radius = fit_circle(chosen)
+    band = max(0.04, 0.3 * radius)
+    kept = [
+        point
+        for point in chosen
+        if abs(math.hypot(point[0] - center_x, point[1] - center_z) - radius) <= band
+    ]
+    if len(kept) < 8:
+        raise ValueError("The ring is too messy to trust.")
+    return fit_circle(kept)
 
 
 def nudge_toward_camera(hit: Vec3, camera: Vec3, meters: float) -> Vec3:

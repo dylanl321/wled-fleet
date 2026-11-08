@@ -29,6 +29,19 @@ public func validateCounts(_ fixture: Fixture, pixels: [MappedPixel]? = nil) thr
     }
 }
 
+public func pitchMillimetres(matching run: Run, waypoints: [Waypoint]) throws -> Double {
+    let index = Dictionary(uniqueKeysWithValues: waypoints.map { ($0.id, $0) })
+    var total = 0.0
+    for segment in run.segments where segment.kind != .jump {
+        let points = try pointsFor(segment, index)
+        total += try segmentLength(segment, points)
+    }
+    if run.pixelCount <= 0 {
+        throw CompileError.message("The controller does not report a pixel count.")
+    }
+    return total / Double(run.pixelCount) * 1000
+}
+
 public func normalise(_ fixture: Fixture) -> Fixture {
     var copy = fixture
     let moved = normalisePoints(copy.waypoints.map(\.position))
@@ -110,20 +123,32 @@ private struct HelixArgs {
 
 private func helixArgs(_ segment: Segment, _ points: [Vec3]) throws -> HelixArgs {
     let handedness = segment.params.handedness == "cw" ? "cw" : "ccw"
-    if let turns = segment.params.turns, let startMm = segment.params.radiusStartMm, let endMm = segment.params.radiusEndMm {
-        let hint = points.count >= 3 ? points[1] - points[0] : nil
+    let radiusStart = segment.params.radiusStartMm.map { $0 / 1000 }
+    let radiusEnd = segment.params.radiusEndMm.map { $0 / 1000 } ?? radiusStart
+    if points.count >= 3 {
+        let fitted = try fitHelix(points, radius: radiusStart, inward: segment.params.inward)
         return HelixArgs(
-            start: points[0], end: points[points.count - 1],
-            radiusStart: startMm / 1000, radiusEnd: endMm / 1000,
-            turns: turns, handedness: handedness, hint: hint
+            start: fitted.axisStart,
+            end: fitted.axisEnd,
+            radiusStart: radiusStart ?? fitted.radiusStart,
+            radiusEnd: radiusEnd ?? fitted.radiusEnd,
+            turns: fitted.turns,
+            handedness: handedness,
+            hint: points[0] - fitted.axisStart
         )
     }
-    let fitted = try fitHelix(points)
-    let hint = points.count >= 3 ? points[1] - points[0] : nil
+    if radiusStart == nil {
+        let fitted = try fitHelix(points)
+        return HelixArgs(
+            start: fitted.axisStart, end: fitted.axisEnd,
+            radiusStart: fitted.radiusStart, radiusEnd: fitted.radiusEnd,
+            turns: segment.params.turns ?? fitted.turns, handedness: handedness, hint: nil
+        )
+    }
     return HelixArgs(
-        start: fitted.axisStart, end: fitted.axisEnd,
-        radiusStart: fitted.radiusStart, radiusEnd: fitted.radiusEnd,
-        turns: fitted.turns, handedness: handedness, hint: hint
+        start: points[0], end: points[points.count - 1],
+        radiusStart: radiusStart ?? 0, radiusEnd: radiusEnd ?? radiusStart ?? 0,
+        turns: segment.params.turns ?? 1, handedness: handedness, hint: nil
     )
 }
 

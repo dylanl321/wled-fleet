@@ -24,6 +24,7 @@ from app.mapper.geom import (
     helix_position,
     normalise_points,
     nudge_toward_camera,
+    robust_circle,
 )
 from app.mapper.ledmap import grid_map, linear_by_height
 from app.mapper.schema_check import require_valid, validate
@@ -215,7 +216,9 @@ def test_helix_formula_and_handedness():
     assert (quarter.x, quarter.y, quarter.z) == pytest.approx((0.08, 0.3, 0))
     ccw = helix_position(start, end, radius, radius, turns, 0.01, "ccw")
     cw = helix_position(start, end, radius, radius, turns, 0.01, "cw")
-    assert ccw.z < 0
+    # Looking up the trunk (gaze +Y), +X toward -Z is counter-clockwise.
+    # The same motion is clockwise when viewed from above. ccw keeps the written formula.
+    assert ccw.x > 0 and ccw.z < 0
     assert cw.z > 0
     assert ccw.z == pytest.approx(-cw.z)
 
@@ -229,9 +232,16 @@ def test_helix_fit_recovers_a_cylinder_and_collapses_a_line():
     assert fitted.axis_start.x == pytest.approx(0, abs=1e-6)
     assert fitted.axis_start.z == pytest.approx(0, abs=1e-6)
     assert fitted.radius_start_m == pytest.approx(0.1, abs=1e-6)
-    line = fit_helix([Vec3(0.2, y, 0.0) for y in (0, 0.4, 0.8, 1.2)])
+    taps = [Vec3(0.2, y, 0.0) for y in (0, 0.4, 0.8, 1.2)]
+    bare = fit_helix(taps)
+    assert bare.turns == 3
+    assert bare.radius_start_m == pytest.approx(0, abs=1e-6)
+    line = fit_helix(taps, radius_m=0.08, inward=Vec3(-1, 0, 0))
     assert line.turns == 3
-    assert line.radius_start_m == pytest.approx(0, abs=1e-6)
+    assert line.radius_start_m == pytest.approx(0.08)
+    assert line.axis_start.x == pytest.approx(0.12)
+    assert line.axis_start.z == pytest.approx(0, abs=1e-6)
+    assert line.axis_end.y == pytest.approx(1.2)
 
 
 def test_curve_passes_through_its_ends_and_is_longer_than_the_chord():
@@ -259,6 +269,15 @@ def test_normalise_puts_the_first_pixel_on_plus_z():
 
 
 def test_circle_fit_and_depth_nudge():
+    ring = []
+    for step in range(16):
+        angle = step / 16 * math.tau
+        ring.append((0.08 * math.cos(angle), 0.08 * math.sin(angle)))
+    wall = [(3.0, z * 0.05) for z in range(-8, 9)]
+    center_x, center_z, radius = robust_circle(ring + wall, near=(0.08, 0.0), max_distance=0.5)
+    assert center_x == pytest.approx(0, abs=1e-3)
+    assert center_z == pytest.approx(0, abs=1e-3)
+    assert radius == pytest.approx(0.08, abs=1e-3)
     center_x, center_z, radius = fit_circle([(1.08, 2), (1, 2.08), (0.92, 2), (1, 1.92)])
     assert center_x == pytest.approx(1, abs=1e-6)
     assert center_z == pytest.approx(2, abs=1e-6)

@@ -105,6 +105,8 @@ final class GeometryTests: XCTestCase {
         assertClose(quarter.z, 0, tol: 1e-9)
         let ccw = helixPosition(axisStart: .zero, axisEnd: Vec3(0, rise, 0), radiusStart: radius, radiusEnd: radius, turns: turns, fraction: 0.01, handedness: "ccw")
         let cw = helixPosition(axisStart: .zero, axisEnd: Vec3(0, rise, 0), radiusStart: radius, radiusEnd: radius, turns: turns, fraction: 0.01, handedness: "cw")
+        // Looking up (+Y), moving from +X toward -Z is counter-clockwise.
+        XCTAssertGreaterThan(ccw.x, 0)
         XCTAssertLessThan(ccw.z, 0)
         XCTAssertGreaterThan(cw.z, 0)
 
@@ -116,8 +118,13 @@ final class GeometryTests: XCTestCase {
         XCTAssertEqual(fitted.turns, 3)
         assertClose(fitted.axisStart.x, 0, tol: 1e-6)
         assertClose(fitted.radiusStart, 0.1, tol: 1e-6)
-        let line = try fitHelix((0..<4).map { Vec3(0.2, Double($0) * 0.4, 0) })
-        assertClose(line.radiusStart, 0, tol: 1e-6)
+        let tapsLine = (0..<4).map { Vec3(0.2, Double($0) * 0.4, 0) }
+        let bare = try fitHelix(tapsLine)
+        assertClose(bare.radiusStart, 0, tol: 1e-6)
+        let line = try fitHelix(tapsLine, radius: 0.08, inward: Vec3(-1, 0, 0))
+        XCTAssertEqual(line.turns, 3)
+        assertClose(line.radiusStart, 0.08)
+        assertClose(line.axisStart.x, 0.12)
     }
 
     func testCurveEndsNormaliseAndNudge() throws {
@@ -137,6 +144,15 @@ final class GeometryTests: XCTestCase {
         let meanX = moved.points.map(\.x).reduce(0, +) / 3
         assertClose(meanX, 0, tol: 1e-9)
 
+        var ring: [(Double, Double)] = []
+        for step in 0..<16 {
+            let angle = Double(step) / 16 * 2 * Double.pi
+            ring.append((0.08 * cos(angle), 0.08 * sin(angle)))
+        }
+        let wall = (-8...8).map { (3.0, Double($0) * 0.05) }
+        let trunk = try robustCircle(ring + wall, near: (0.08, 0), maxDistance: 0.5)
+        assertClose(trunk.radius, 0.08, tol: 1e-3)
+        assertClose(trunk.x, 0, tol: 1e-3)
         let circle = try fitCircle([(1.08, 2), (1, 2.08), (0.92, 2), (1, 1.92)])
         assertClose(circle.x, 1, tol: 1e-6)
         assertClose(circle.radius, 0.08, tol: 1e-6)

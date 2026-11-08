@@ -121,6 +121,10 @@ final class ServerClient {
         )
     }
 
+    func scalePitch(fixture: String, run: String) async throws -> Fixture {
+        try await send(Fixture.self, path: "/api/mapper/fixtures/\(fixture)/runs/\(run)/scale-pitch", method: "POST", body: [String: String]())
+    }
+
     func stop(fixture: String) async throws {
         let _: Ack = try await send(path: "/api/mapper/fixtures/\(fixture)/stop", method: "POST", body: [String: String]())
     }
