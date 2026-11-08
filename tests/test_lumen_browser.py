@@ -78,6 +78,38 @@ def _writes(port):
     return httpx.get(f"http://127.0.0.1:{port}/debug/ws", timeout=2).json()["writes"]
 
 
+def _settle_writes(port, quiet=0.2, timeout=4.0):
+    """Wait until the controller has had no new state writes for `quiet` seconds.
+
+    A preview that is still in flight when the test samples the log shows up
+    late, next to the following preview, and the gap looks shorter than the
+    preview interval.
+    """
+    deadline = time.monotonic() + timeout
+    previous = len(_writes(port))
+    stable = time.monotonic()
+    while time.monotonic() < deadline:
+        time.sleep(0.02)
+        count = len(_writes(port))
+        if count != previous:
+            previous = count
+            stable = time.monotonic()
+            continue
+        if time.monotonic() - stable >= quiet:
+            return
+    raise AssertionError("controller writes did not settle")
+
+
+def _wait_for_commit(port, after, timeout=4.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        for row in _writes(port):
+            if row["t"] > after and row["body"].get("tt") == 4:
+                return row
+        time.sleep(0.02)
+    raise AssertionError("scrub did not commit")
+
+
 def _preview_times(port):
     times = []
     for row in _writes(port):
@@ -158,6 +190,7 @@ def test_phone_flow_on_one_screen(house, browser_name):
         assert page.locator("[data-screen='home'][data-active='true']").count() == 1
         assert page.locator("[data-screen][data-active='true']").count() == 1
 
+        _settle_writes(house["porch"])
         before = len(_preview_times(house["porch"]))
         tray = page.locator("[data-look-tray]")
         box = tray.bounding_box()
@@ -169,8 +202,11 @@ def test_phone_flow_on_one_screen(house, browser_name):
         for step in range(1, 14):
             page.mouse.move(start_x - step * 22, y)
             page.wait_for_timeout(90)
+        rows = _writes(house["porch"])
+        stamp = rows[-1]["t"] if rows else 0
         page.mouse.up()
-        page.wait_for_timeout(400)
+        _wait_for_commit(house["porch"], stamp)
+        _settle_writes(house["porch"])
         times = _preview_times(house["porch"])[before:]
         assert len(times) >= 3, times
         gaps = [times[index + 1] - times[index] for index in range(len(times) - 1)]

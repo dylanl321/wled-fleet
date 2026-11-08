@@ -25,6 +25,7 @@ from app.domain import (
     board_profile,
     downsample_linear,
     parse_live_binary,
+    preview_interval,
     should_send,
     slice_frame,
 )
@@ -55,6 +56,8 @@ class BoardLink:
         self.profile = board_profile(arch)
         self.sequencer = WriteSequencer()
         self.batch = BatchWriter(self.profile.write_gap)
+        self._kinds: dict[int, str] = {}
+        self._last_preview_at = -1e9
         self.effects: list[str] = []
         self.palettes: list[str] = []
         self.connected = False
@@ -77,6 +80,7 @@ class BoardLink:
 
     def submit(self, kind: str, body: dict) -> dict:
         decision = self.sequencer.submit(kind, body)
+        self._kinds[decision["seq"]] = kind
         if decision["send"] is not None:
             self._pending = (decision["seq"], decision["send"])
             self._wake.set()
@@ -174,6 +178,18 @@ class BoardLink:
             if self._pending is not None:
                 seq, body = self._pending
                 self._pending = None
+            if self._kinds.get(seq) == "preview":
+                # A preview that was waiting behind another write would otherwise
+                # leave the socket the moment the previous one finishes. Hold it
+                # so the board still sees the preview interval.
+                wait = preview_interval(1) - (time.monotonic() - self._last_preview_at)
+                if wait > 0:
+                    self._pending = (seq, body)
+                    try:
+                        await asyncio.wait_for(self._wake.wait(), timeout=wait)
+                    except asyncio.TimeoutError:
+                        pass
+                    continue
             sent = self.batch.push(time.monotonic(), seq, body)
             if not sent:
                 self._pending = (seq, body)
@@ -184,6 +200,8 @@ class BoardLink:
             outgoing.setdefault("v", True)
             self._sent.append(seq)
             await ws.send(json.dumps(outgoing))
+            if self._kinds.pop(seq, None) == "preview":
+                self._last_preview_at = time.monotonic()
             follow = self.sequencer.finished(seq)
             if follow and follow.get("send") is not None:
                 self._pending = (follow["seq"], follow["send"])
