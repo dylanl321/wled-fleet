@@ -1,5 +1,5 @@
 import { dominant, renderEffect } from "./effects.js";
-import { drawRibbon, frameAt } from "./ribbon.js";
+import { drawMatrix, drawRibbon, frameAt } from "./ribbon.js";
 
 const ENGAGE_X = 12;
 const CANCEL_Y = 6;
@@ -14,6 +14,14 @@ const COMMIT_MS = 400;
 const STALE_MS = 10 * 60 * 1000;
 
 const app = document.getElementById("app");
+
+function loadClipboard() {
+  try {
+    return JSON.parse(localStorage.getItem("lumen.clipboard") || "null");
+  } catch (error) {
+    return null;
+  }
+}
 const state = {
   home: null,
   maint: null,
@@ -36,6 +44,8 @@ const state = {
   identify: {},
   ruler: {},
   finder: null,
+  outputs: null,
+  clipboard: loadClipboard(),
   zonePick: {},
   confirm: null,
   dragging: false,
@@ -254,6 +264,8 @@ function signature() {
     state.maint ? 1 : 0,
     JSON.stringify(state.zonePick),
     JSON.stringify(state.ruler),
+    state.outputs ? `outputs:${state.outputs.legend.length}` : "",
+    state.clipboard ? `clip:${state.clipboard.effect}:${JSON.stringify(state.clipboard.colors)}` : "",
     state.finder ? `${state.finder.mac}/${state.finder.output}/${state.finder.cuts.join(",")}/${state.finder.saving ? 1 : 0}` : "",
   ].join("~");
 }
@@ -278,7 +290,7 @@ function patch() {
 }
 
 function view() {
-  return `${statusBar()}<div class="banner" data-banner ${state.banner ? "" : "hidden"}>${escapeHtml(state.banner)}</div><div class="stage">${screen("home", homeView())}${screen("find", findView())}${screen("maintenance", maintView())}</div>${handle()}${sheet()}${undoPill()}`;
+  return `${statusBar()}<div class="banner" data-banner ${state.banner ? "" : "hidden"}>${escapeHtml(state.banner)}</div><div class="stage">${screen("home", homeView())}${screen("find", findView())}${screen("maintenance", maintView())}${screen("outputs", outputsView())}</div>${handle()}${sheet()}${undoPill()}`;
 }
 
 function screen(name, body) {
@@ -340,7 +352,7 @@ function sheet() {
   const many = state.selection.size > MANY ? `<p class="preview-note" data-preview-note>previewing ${state.selection.size} lights</p>` : `<p class="preview-note" data-preview-note></p>`;
   const current = state.draft;
   const intensity = current && String(current.effect).toLowerCase() !== "solid" ? "" : "hidden";
-  return `<section class="sheet" data-paint data-open="${state.sheet ? "true" : "false"}" style="--sheet:${Math.round(state.sheetRatio * 100)}%"><div class="grab" data-grab></div><div class="selection-head" data-selection-head>${minis}<strong>${escapeHtml(selectionLabel())}</strong><button class="chip" data-select-all>All</button></div><div class="look-tray" data-look-tray ${state.solid ? "hidden" : ""}>${looks().map(swatch).join("")}</div><div class="solid" data-solid ${state.solid ? "" : "hidden"}><div class="temp" data-temperature></div><input class="solid-sat" data-saturation type="range" min="0" max="100" value="80" aria-label="Saturation"></div>${many}<div class="dials"><label class="dial">Brightness<input data-dial="bri" type="range" min="0" max="255" value="${chosen[0]?.bri ?? 128}"></label><label class="dial">Speed<input data-dial="sx" type="range" min="0" max="255" value="${current?.sx ?? 128}"></label><label class="dial" data-intensity ${intensity}>Intensity<input data-dial="ix" type="range" min="0" max="255" value="${current?.ix ?? 128}"></label></div><div class="more" data-more ${state.sheetRatio > 0.78 ? "" : "hidden"}><input data-look-name placeholder="Look name" aria-label="Look name"><button class="text-btn" data-save-look>Save as Look</button></div></section>`;
+  return `<section class="sheet" data-paint data-open="${state.sheet ? "true" : "false"}" style="--sheet-height:${Math.round(state.sheetRatio * 100)}%"><div class="grab" data-grab></div><div class="selection-head" data-selection-head>${minis}<strong>${escapeHtml(selectionLabel())}</strong><span class="head-chips">${clipboardChips()}<button class="chip" data-select-all>All</button></span></div><div class="look-tray" data-look-tray ${state.solid ? "hidden" : ""}>${looks().map(swatch).join("")}</div><div class="solid" data-solid ${state.solid ? "" : "hidden"}><div class="temp" data-temperature></div><input class="solid-sat" data-saturation type="range" min="0" max="100" value="80" aria-label="Saturation"></div>${many}<div class="dials"><label class="dial">Brightness<input data-dial="bri" type="range" min="0" max="255" value="${chosen[0]?.bri ?? 128}"></label><label class="dial">Speed<input data-dial="sx" type="range" min="0" max="255" value="${current?.sx ?? 128}"></label><label class="dial" data-intensity ${intensity}>Intensity<input data-dial="ix" type="range" min="0" max="255" value="${current?.ix ?? 128}"></label></div><div class="more" data-more ${state.sheetRatio > 0.78 ? "" : "hidden"}><input data-look-name placeholder="Look name" aria-label="Look name"><button class="text-btn" data-save-look>Save as Look</button></div></section>`;
 }
 
 function swatch(look) {
@@ -564,7 +576,81 @@ function maintView() {
   const confirm = state.confirm
     ? `<div class="confirm" data-confirm><p>Restore this backup?</p><button class="danger" data-restore-go="${state.confirm}">Restore</button><button class="text-btn" data-confirm-cancel>Cancel</button></div>`
     : "";
-  return `<button class="back" data-back>Back</button><div class="maint">${needBlock}<h2>Boards</h2>${boards}<h2>Backups</h2>${backups}${confirm}<h2>Server</h2><section class="server"><p class="meta">${escapeHtml(server.version || "")} · up ${formatUptime(server.uptime)}</p><label class="meta"><input data-mirror type="checkbox" ${server.mirror_looks ? "checked" : ""}> Mirror looks to presets</label><input data-property-name value="${escapeHtml(server.property || "")}" aria-label="Property name"><button class="text-btn" data-rescan>Rescan now</button></section></div>`;
+  return `<button class="back" data-back>Back</button><div class="maint"><button class="show-outputs" data-show-outputs><span class="show-outputs-dots"><i></i><i></i><i></i><i></i></span>Show every output in its own color</button>${needBlock}<h2>Boards</h2>${boards}<h2>Backups</h2>${backups}${confirm}<h2>Server</h2><section class="server"><p class="meta">${escapeHtml(server.version || "")} · up ${formatUptime(server.uptime)}</p><label class="meta"><input data-mirror type="checkbox" ${server.mirror_looks ? "checked" : ""}> Mirror looks to presets</label><input data-property-name value="${escapeHtml(server.property || "")}" aria-label="Property name"><button class="text-btn" data-rescan>Rescan now</button></section></div>`;
+}
+
+// ----- show outputs -------------------------------------------------------------
+
+function outputsView() {
+  const data = state.outputs;
+  if (!data) return `<button class="back" data-outputs-done>Maintenance</button>`;
+  const boards = [];
+  for (const item of data.legend) {
+    let group = boards.find((entry) => entry.mac === item.mac);
+    if (!group) {
+      group = { mac: item.mac, board: item.board, items: [] };
+      boards.push(group);
+    }
+    group.items.push(item);
+  }
+  const groups = boards
+    .map((group) => `<section class="legend"><h2>${escapeHtml(group.board)}</h2>${group.items
+      .map((item) => `<div class="legend-row"><i class="legend-swatch is-${item.pattern}" style="--c:#${item.color}"></i><div><strong>Output ${item.output}</strong><p class="meta">${escapeHtml(item.light || "Not named yet")} · ${escapeHtml(item.name)}${item.pattern === "solid" ? "" : `, ${item.pattern}`}</p></div></div>`)
+      .join("")}</section>`)
+    .join("");
+  return `<button class="back" data-outputs-done>Done</button><header class="board-head"><h1>Every output</h1><p class="meta">Each output is lit in the color shown. Your lights go back when you tap Done, or in 3 minutes.</p></header>${groups}`;
+}
+
+async function showOutputs() {
+  haptic("medium");
+  try {
+    state.outputs = await api("/api/lumen/outputs/show", {});
+    go("outputs");
+  } catch (error) {
+    state.banner = String(error.message || error);
+    scheduleRender();
+  }
+}
+
+async function hideOutputs() {
+  state.outputs = null;
+  go("maintenance");
+  await api("/api/lumen/outputs/hide", {}).catch(() => {});
+}
+
+// ----- copy and paste a look ------------------------------------------------------
+
+function copyLook() {
+  const light = lightById([...state.selection][0]);
+  if (!light) return;
+  state.clipboard = {
+    from: light.name,
+    effect: light.effect || "Solid",
+    palette: light.palette || "Default",
+    colors: light.colors || [[255, 214, 170], [0, 0, 0], [0, 0, 0]],
+    sx: light.sx ?? 128,
+    ix: light.ix ?? 128,
+  };
+  try {
+    localStorage.setItem("lumen.clipboard", JSON.stringify(state.clipboard));
+  } catch (error) {
+    /* storage blocked: the copy still lasts until the app closes */
+  }
+  haptic("success");
+  scheduleRender();
+}
+
+function pasteLook() {
+  const clip = state.clipboard;
+  if (!clip || !state.selection.size) return;
+  haptic("medium");
+  commitLook({ name: `look from ${clip.from}`, effect: clip.effect, fallback: "Solid", palette: clip.palette, colors: clip.colors, sx: clip.sx, ix: clip.ix });
+}
+
+function clipboardChips() {
+  const clip = state.clipboard;
+  const paste = clip ? `<button class="chip clip-chip" data-paste title="Paste the look from ${escapeHtml(clip.from)}"><canvas data-clip></canvas>Paste</button>` : "";
+  return `<button class="chip" data-copy>Copy</button>${paste}`;
 }
 
 function row(title, meta, extra, attrs = "") {
@@ -928,11 +1014,16 @@ function tick(now) {
     if (flow && now - flow.start > COMMIT_MS) delete state.flow[id];
     if (identify && now - identify >= 1200) delete state.identify[id];
   });
+  if (state.clipboard) {
+    const clip = state.clipboard;
+    document.querySelectorAll("[data-clip]").forEach((canvas) => {
+      drawMatrix(canvas, (count, at) => renderEffect({ ...clip, on: true, bri: 255 }, count, at), now, { cols: 6 });
+    });
+  }
   document.querySelectorAll("[data-swatch]").forEach((canvas) => {
     const look = lookById(canvas.dataset.swatch);
     if (!look) return;
-    const pixels = renderEffect({ ...look, on: true, bri: 255 }, 24, now);
-    drawRibbon(canvas, pixels, { now });
+    drawMatrix(canvas, (count, at) => renderEffect({ ...look, on: true, bri: 255 }, count, at), now);
   });
   requestAnimationFrame(tick);
 }
@@ -1037,7 +1128,7 @@ function onPointerMove(event) {
     const ratio = Math.max(0.42, Math.min(0.9, state.sheetRatio - dy / window.innerHeight));
     state.sheetRatio = ratio;
     const sheetNode = document.querySelector("[data-paint]");
-    if (sheetNode) sheetNode.style.setProperty("--sheet", `${Math.round(ratio * 100)}%`);
+    if (sheetNode) sheetNode.style.setProperty("--sheet-height", `${Math.round(ratio * 100)}%`);
     const more = document.querySelector("[data-more]");
     if (more) more.hidden = ratio <= 0.78;
   }
@@ -1158,6 +1249,8 @@ function handleTap(event, current) {
     else selectOnly(id);
     return;
   }
+  // Tapping Home outside a ribbon puts the Paint sheet away, like any iOS sheet.
+  if (state.sheet && state.screen === "home" && event.target.closest('[data-screen="home"]')) return closeSheet();
   const look = event.target.closest("[data-look]");
   if (look) {
     const chosen = lookById(look.dataset.look);
@@ -1352,6 +1445,10 @@ function bind() {
       state.zonePick[event.target.dataset.zoneNew] = "new";
       scheduleRender();
     }
+    if (event.target.closest("[data-show-outputs]")) showOutputs();
+    if (event.target.closest("[data-outputs-done]")) hideOutputs();
+    if (event.target.closest("[data-copy]")) copyLook();
+    if (event.target.closest("[data-paste]")) pasteLook();
     if (event.target.closest("[data-finder-open]")) openFinder(Number(event.target.closest("[data-finder-open]").dataset.finderOpen));
     if (event.target.closest("[data-step]")) moveMarker((state.finder?.marker || 0) + Number(event.target.closest("[data-step]").dataset.step));
     if (event.target.closest("[data-cut]")) addCut();

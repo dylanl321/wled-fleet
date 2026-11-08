@@ -14,6 +14,18 @@ A preview image is published from the `lumen` branch as `ghcr.io/dylanl321/wled-
 - From the phone: on/off, brightness, color, presets, segments, LED lengths, rename, identify, reboot. Wi-Fi and the access point are shown and are not editable.
 - Firmware is per device or per profile (Dig-Uno ESP32, Dig-Uno ESP8266, Dig-Quad, generic ESP32, generic ESP8266). You can upload a `.bin` or pull one from the QuinLED or official WLED GitHub releases. The image header and the file name have to match the controller's chip, and a Dig-Uno file will not be offered to a Dig-Quad. A backup runs first. Nothing flashes on a schedule.
 
+## Which light is which
+
+Maintenance → **Show every output in its own color** lights each output of every controller in a different color, and the phone lists which is which: "Purple · Eaves · Output 3 · Eaves 3". There are 12 colors that LEDs render clearly. Past 12 outputs the colors come back dashed, then dotted. Tap **Done**, or wait 3 minutes, and every light goes back to what it was showing.
+
+## Copy a look to other lights
+
+In Paint, **Copy** takes the effect, palette, colors, speed, and intensity of the light you are painting. Select any other lights, on any controllers, and tap **Paste**. Each controller looks the effect up by name, so it works across firmware versions, and Undo puts the old look back.
+
+## A whole house of mock controllers
+
+`python -m mock.house` starts nine mock controllers with 24 outputs between them, like a real install of Dig-Quads, Dig-Unos, an ESP8266, and one board not set up yet. Point the app at them with `EXTRA_HOSTS=$(python -m mock.house --hosts) python -m app`.
+
 ## Splitting an output into lights
 
 One output often drives runs you think of separately: the top and bottom of a shelf, two sides of a porch rail. In Find, tap **Split into segments** on that output.

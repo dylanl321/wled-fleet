@@ -22,6 +22,7 @@ from app.domain import (
     LightRef,
     PlannedLight,
     build_marks_state,
+    build_outputs_state,
     build_split_state,
     build_targeted_state,
     clean_cuts,
@@ -29,6 +30,7 @@ from app.domain import (
     finder_marks,
     heal_state,
     migration_plan,
+    output_marks,
     plan_split,
     resolve_look,
     sync_plan,
@@ -140,6 +142,8 @@ class Lumen:
         self._flash: dict[str, asyncio.Task] = {}
         self._saved_flash: dict[str, dict] = {}
         self._saved_split: dict[str, dict] = {}
+        self._showing: dict[str, dict] = {}
+        self._showing_timer: asyncio.Task | None = None
         self._healed: dict[str, float] = {}
 
     async def run(self) -> None:
@@ -685,6 +689,77 @@ class Lumen:
         result["split"] = [{"start": piece.start - start, "stop": piece.stop - start, "segment_id": piece.segment_id} for piece in planned]
         return result
 
+    # ----- show outputs -----------------------------------------------------
+
+    SHOW_SECONDS = 180
+
+    async def show_outputs(self) -> dict:
+        """Light every output of every online controller in its own color, and say which is which."""
+        await self.hide_outputs(restore=True)
+        devices = sorted(
+            (device for device in self.db.list_devices() if device["online"] and not device.get("forgotten")),
+            key=lambda device: str(device["name"]).lower(),
+        )
+        rows: list[tuple[dict, dict]] = []
+        for device in devices:
+            lights = sorted(self.db.lights_for_mac(device["mac"]), key=lambda light: (int(light["output_index"]), int(light["start"])))
+            rows.extend((device, light) for light in lights)
+        marks = output_marks(len(rows))
+        legend = []
+        by_board: dict[str, list[dict]] = {}
+        for (device, light), mark in zip(rows, marks):
+            by_board.setdefault(device["mac"], []).append(
+                {"id": int(light["segment_id"]), "start": int(light["start"]), "stop": int(light["stop"]), "mark": mark}
+            )
+            legend.append(
+                {
+                    **mark,
+                    "mac": device["mac"],
+                    "board": device["name"],
+                    "output": int(light["output_index"]) + 1,
+                    "light_id": int(light["id"]),
+                    "light": light["name"] if light.get("named") else None,
+                    "leds": max(0, int(light["stop"]) - int(light["start"])),
+                }
+            )
+        for device in devices:
+            segments = by_board.get(device["mac"])
+            if not segments:
+                continue
+            try:
+                self._showing[device["mac"]] = await self.fleet.wled.get_json(device, "/json/state", timeout=2.5)
+            except WledError:
+                continue
+            self.hub.submit(device["mac"], device.get("arch"), "commit", build_outputs_state(segments))
+        self._showing_timer = asyncio.create_task(self._hide_later())
+        return {"legend": legend, "seconds": self.SHOW_SECONDS}
+
+    async def _hide_later(self) -> None:
+        try:
+            await asyncio.sleep(self.SHOW_SECONDS)
+        except asyncio.CancelledError:
+            return
+        await self.hide_outputs(restore=True, from_timer=True)
+
+    async def hide_outputs(self, restore: bool = True, from_timer: bool = False) -> dict:
+        timer = self._showing_timer
+        self._showing_timer = None
+        if timer and not from_timer:
+            timer.cancel()
+        saved, self._showing = self._showing, {}
+        for mac, state in saved.items():
+            device = self.db.get_device(mac)
+            if device is None or not restore:
+                continue
+            body = {"tt": 0, **_restore_body(state)}
+            body["seg"] = [
+                {**segment, "grp": segment.get("grp", 1), "spc": segment.get("spc", 0), "frz": False}
+                for segment in body.get("seg") or []
+                if isinstance(segment, dict)
+            ]
+            self.hub.submit(mac, device.get("arch"), "commit", body)
+        return {"restored": len(saved)}
+
     def _heal(self, mac: str, state: dict) -> None:
         """Put back segments a split board lost, e.g. after it rebooted without a boot preset."""
         if mac in self._saved_split:
@@ -771,6 +846,14 @@ class Lumen:
         fields: dict = {"name": clean, "named": True}
         if zone_id is not None:
             fields["zone_id"] = zone_id
+        if not match.get("named"):
+            # A newly set-up light goes to the end of its zone, in the order you set them up.
+            peers = [
+                int(light.get("position") or 0)
+                for light in self.db.list_lights()
+                if light.get("named") and light.get("zone_id") == (zone_id if zone_id is not None else match.get("zone_id"))
+            ]
+            fields["position"] = (max(peers) + 1) if peers else 0
         updated = self.db.update_light(int(match["id"]), fields)
         assert updated is not None
         return self._public_light(updated)
@@ -1210,6 +1293,14 @@ def mount_lumen(app: FastAPI) -> None:
     @app.post("/api/lumen/find/{mac}/length")
     async def length(mac: str, body: LengthIn, request: Request) -> dict:
         return await lumen_of(request).set_length(mac_of(request, mac), body)
+
+    @app.post("/api/lumen/outputs/show")
+    async def outputs_show(request: Request) -> dict:
+        return await lumen_of(request).show_outputs()
+
+    @app.post("/api/lumen/outputs/hide")
+    async def outputs_hide(request: Request) -> dict:
+        return await lumen_of(request).hide_outputs()
 
     @app.post("/api/lumen/find/{mac}/split/preview")
     async def split_preview(mac: str, body: SplitPreviewIn, request: Request) -> dict:

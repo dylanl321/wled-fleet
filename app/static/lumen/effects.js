@@ -45,6 +45,15 @@ function hash(n) {
   return x - Math.floor(x);
 }
 
+// Value noise that changes smoothly from one LED to the next and over time, so
+// flicker looks like soft patches of light rather than stripes.
+function smooth(x, seed) {
+  const base = Math.floor(x);
+  let f = x - base;
+  f = f * f * (3 - 2 * f);
+  return hash(base + seed * 57.3) * (1 - f) + hash(base + 1 + seed * 57.3) * f;
+}
+
 function paletteColor(look, phase, clock) {
   const name = String(look.palette || "").toLowerCase();
   if (name.includes("rainbow")) return hue(phase + clock * 0.05);
@@ -85,7 +94,20 @@ export function renderEffect(look, count, now) {
   for (let index = 0; index < width; index += 1) {
     const phase = width === 1 ? 0 : index / (width - 1);
     let rgb = primary;
-    if (name.includes("rainbow") || name.includes("colorloop") || name.includes("colorwave") || name.includes("aurora")) {
+    if (name.includes("colorloop")) {
+      // Colorloop cycles the whole strip through the hues together.
+      rgb = hue(clock * 0.08);
+    } else if (name.includes("aurora")) {
+      // Curtains of green and violet that drift and swell.
+      const band = smooth(phase * 9 + clock * 0.5, 5);
+      const glow = 0.25 + 0.75 * smooth(phase * 15 - clock * 0.8, 6);
+      rgb = mix(mix([10, 200, 120], [120, 40, 220], band), [0, 0, 0], 1 - glow);
+    } else if (name.includes("colorwave") && !String(look.palette || "").toLowerCase().includes("rainbow")) {
+      // Colorwaves runs its palette (Aurora, Ocean, ...) in slow swells.
+      const at = (phase * 1.6 + clock * 0.05 + 0.15 * Math.sin(phase * 9 + clock)) % 1;
+      const glow = 0.35 + 0.65 * smooth(phase * 12 - clock * 0.7, 7);
+      rgb = mix(paletteColor(look, at, clock), [0, 0, 0], 1 - glow);
+    } else if (name.includes("rainbow") || name.includes("colorwave")) {
       rgb = hue(phase * 0.85 + clock * 0.08);
     } else if (name.includes("ocean") || name.includes("pacifica") || name.includes("lake")) {
       const wave = 0.5 + 0.5 * Math.sin(phase * 8 + clock * 2);
@@ -93,12 +115,18 @@ export function renderEffect(look, count, now) {
     } else if (name.includes("rain")) {
       const drop = hash(Math.floor(clock * 3) * 13 + index) > 0.82;
       rgb = drop ? [180, 210, 255] : mix(secondary, primary, 0.15);
-    } else if (name.includes("candle") || name.includes("flicker") || name.includes("ember") || name.includes("fire")) {
-      const flick = 0.45 + 0.55 * Math.abs(Math.sin(clock * 9 + index * 1.7) * Math.sin(clock * 3 + index));
-      rgb = mix([40, 0, 0], primary, flick);
+    } else if (name.includes("candle") || (name.includes("flicker") && !name.includes("fire"))) {
+      // A candle flickers in broad, drifting patches and never drops far: dim to
+      // a deeper orange, not toward brown.
+      const flick = 0.45 + 0.55 * smooth(phase * 22 + clock * 1.6, 1) * (0.7 + 0.3 * smooth(clock * 4 + phase * 5, 2));
+      rgb = mix([primary[0], primary[1] * 0.55, primary[2] * 0.3], primary, flick).map((c) => clamp(c * (0.3 + 0.7 * flick)));
+    } else if (name.includes("ember") || name.includes("fire")) {
+      // Heat drifts along the strip: deep red where it is cool, gold where it is hot.
+      const heat = smooth(phase * 18 + clock * 0.9, 3) * 0.75 + 0.25 * smooth(phase * 41 - clock * 2.2, 4);
+      rgb = heat < 0.5 ? mix([150, 18, 0], [255, 70, 0], heat * 2) : mix([255, 70, 0], [255, 190, 60], (heat - 0.5) * 2);
     } else if (name.includes("breathe") || name.includes("pulse") || name.includes("heartbeat")) {
       const beat = name.includes("heart")
-        ? Math.pow(Math.max(0, Math.sin(clock * 3)), 8)
+        ? 0.12 + 0.88 * Math.pow(Math.max(0, Math.sin(clock * 3)), 6)
         : 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(clock * 2));
       rgb = mix([0, 0, 0], primary, beat);
     } else if (name.includes("twinkle") || name.includes("sparkle") || name.includes("firework")) {
@@ -107,7 +135,9 @@ export function renderEffect(look, count, now) {
     } else if (name.includes("meteor") || name.includes("scan") || name.includes("scanner")) {
       const head = (clock * 0.35) % 1;
       const dist = Math.abs(phase - head);
-      rgb = mix(secondary, primary, Math.max(0, 1 - dist * width / 3));
+      // A head with a fading tail behind it.
+      const behind = (head - phase + 1) % 1;
+      rgb = mix(secondary, primary, Math.max(0, 1 - behind * width / 14));
     } else if (
       name.includes("chase") ||
       name.includes("theater") ||

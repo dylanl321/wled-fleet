@@ -543,6 +543,65 @@ def _keep(light: dict, output_index: int, segment_id: int, start: int, stop: int
     }
 
 
+# ----- show outputs ---------------------------------------------------------------
+
+# Colors an LED renders clearly and that stay apart from each other. Past the
+# list, the same colors come back dashed, then dotted, so every output differs.
+OUTPUT_COLORS = [
+    ("Red", "FF0000"),
+    ("Orange", "FF6A00"),
+    ("Yellow", "FFE000"),
+    ("Lime", "8CFF00"),
+    ("Green", "00FF30"),
+    ("Teal", "00FFC0"),
+    ("Cyan", "00B4FF"),
+    ("Blue", "0028FF"),
+    ("Purple", "8C00FF"),
+    ("Magenta", "FF00E0"),
+    ("Pink", "FF5A8C"),
+    ("White", "FFFFFF"),
+]
+OUTPUT_PATTERNS = [("solid", 1, 0), ("dashed", 3, 2), ("dotted", 1, 2)]
+
+
+def output_marks(count: int) -> list[dict]:
+    """Color and pattern for each of `count` outputs, in order; neighbours differ most."""
+    marks = []
+    colors = len(OUTPUT_COLORS)
+    # Step through the colors by a stride that is coprime with their count, so
+    # consecutive outputs (often on the same board) land far apart on the wheel.
+    stride = 5
+    for index in range(count):
+        name, hexa = OUTPUT_COLORS[(index * stride) % colors]
+        pattern, grp, spc = OUTPUT_PATTERNS[min(index // colors, len(OUTPUT_PATTERNS) - 1)]
+        marks.append({"color": hexa, "name": name, "pattern": pattern, "grp": grp, "spc": spc})
+    return marks
+
+
+def build_outputs_state(segments: list[dict]) -> dict:
+    """Light each segment solid in its mark. `segments`: id, start, stop, mark."""
+    painted = []
+    for segment in segments:
+        mark = segment["mark"]
+        hexa = mark["color"]
+        rgb = [int(hexa[0:2], 16), int(hexa[2:4], 16), int(hexa[4:6], 16)]
+        painted.append(
+            {
+                "id": int(segment["id"]),
+                "start": int(segment["start"]),
+                "stop": int(segment["stop"]),
+                "on": True,
+                "bri": 255,
+                "fx": 0,
+                "frz": False,
+                "grp": mark["grp"],
+                "spc": mark["spc"],
+                "col": [rgb, [0, 0, 0], [0, 0, 0]],
+            }
+        )
+    return {"tt": 0, "on": True, "bri": 255, "seg": painted}
+
+
 # ----- segment finder ----------------------------------------------------------
 
 # Distinct, easy-to-tell-apart colors for the pieces of a split output.
